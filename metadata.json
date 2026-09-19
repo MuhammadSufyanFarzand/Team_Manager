@@ -1,0 +1,9 @@
+{
+  "name": "Global Group Chat",
+  "description": "A real-time group chat application with image sharing and notifications.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera"
+  ],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

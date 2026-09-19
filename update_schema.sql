@@ -1,0 +1,2 @@
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_edited BOOLEAN DEFAULT false;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS read_by text[] DEFAULT '{}';
