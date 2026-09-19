@@ -4,13 +4,14 @@
  */
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { supabase } from './supabase';
-import { Message, GroupSettings, UserProfile, OnlineUser, BanAppeal, MessageType, UserDailyStats } from './types';
-import { Send, Image as ImageIcon, User, Bell, BellOff, BellRing, Volume2, VolumeX, Edit2, Trash2, Check, CheckCheck, X, Info, Copy, ExternalLink, Reply, Settings, Camera, Loader2, Shield, ShieldAlert, Crown, Users, Lock, Mail, Phone, FileText, LogOut, Eye, EyeOff, Clock, Circle, Ban, UserX, UserCheck, UserMinus, AlertTriangle, Mic, MicOff, Play, Pause, Download, Video as VideoIcon, Music, Paperclip, Plus, FileArchive, Star, Sparkles, ShoppingBag, Gift, Activity, BarChart2, Search, Forward, SmilePlus, PhoneCall, PhoneOff, Briefcase, MoreVertical, ArrowLeft } from 'lucide-react';
+import { Message, GroupSettings, UserProfile, OnlineUser, BanAppeal, MessageType, UserDailyStats, CompanyRole, ROLE_HIERARCHY } from './types';
+import { Send, Image as ImageIcon, User, Bell, BellOff, BellRing, Volume2, VolumeX, Edit2, Trash2, Check, CheckCheck, X, Info, Copy, ExternalLink, Reply, Settings, Camera, Loader2, Shield, ShieldAlert, ShieldCheck, GraduationCap, Crown, Users, Lock, Mail, Phone, FileText, LogOut, Eye, EyeOff, Clock, Circle, Ban, UserX, UserCheck, UserMinus, AlertTriangle, Mic, MicOff, Play, Pause, Download, Video as VideoIcon, Music, Paperclip, Plus, FileArchive, Star, Sparkles, ShoppingBag, Gift, Activity, BarChart2, Search, Forward, SmilePlus, PhoneCall, PhoneOff, Briefcase, MoreVertical, ArrowLeft } from 'lucide-react';
 import { uploadToCloudinary, getCloudinaryDownloadUrl } from './lib/cloudinary';
 import { LeadManagement } from './components/LeadManagement';
 import { OwnerDashboard } from './components/dashboard/OwnerDashboard';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from './lib/utils';
+import { getUserRole, canManageUser, getAllowedAssignableRoles, applyRoleChange, ROLE_DETAILS } from './lib/roleHierarchy';
 
 const renderMessageContent = (content: string) => {
   const urlRegex = /(https?:\/\/[^\s]+)/g;
@@ -178,6 +179,7 @@ export default function App() {
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
 
   // Tracking refs (we use refs to avoid interval dependency hell)
+  const broadcastChannelRef = useRef<BroadcastChannel | null>(null);
   const statsRef = useRef({ clicks: 0, seconds: 0, messages: 0, isFocused: true });
   const typingTimerRef = useRef<NodeJS.Timeout | null>(null);
   const isSelfTypingRef = useRef<boolean>(false);
@@ -208,34 +210,88 @@ export default function App() {
     }
   }, [mediaErrorToast]);
 
-  // Dynamically assign the first registering or logging in user as CEO of the company
+  // Dynamically assign ONLY the very first registered user as CEO.
+  // All other users (2nd, 3rd, 4th, etc.) are strictly regular Employees.
   const claimCeoIfUnassigned = async (candidateUsername: string): Promise<boolean> => {
     const cleanCand = candidateUsername.trim();
     if (!cleanCand) return false;
+    const candLower = cleanCand.toLowerCase();
 
     try {
-      const { data } = await supabase.from('group_settings').select('*').eq('id', 1).maybeSingle();
-      const currentOwner = (data?.owner_username || activeGroupSettings.owner_username || '').trim();
-      const isUnclaimed = !currentOwner || currentOwner.toLowerCase() === 'mr saqib';
+      // 1. Check local storage or active settings for an already established CEO
+      const localCeo = (localStorage.getItem('chat_company_ceo') || '').trim();
+      const existingOwner = (activeGroupSettings.owner_username || '').trim();
 
-      if (isUnclaimed) {
-        const existingAdmins = (data?.admin_usernames || []).filter((u: string) => u.toLowerCase() !== 'mr saqib');
-        const updated: GroupSettings = {
-          id: 1,
-          name: data?.name || activeGroupSettings.name || 'Global Chat',
-          description: data?.description || activeGroupSettings.description || 'Welcome to the global chat room!',
-          avatar_url: data?.avatar_url || activeGroupSettings.avatar_url || null,
-          owner_username: cleanCand,
-          admin_usernames: Array.from(new Set([...existingAdmins, cleanCand])),
-          leader_usernames: data?.leader_usernames || [],
-          banned_usernames: data?.banned_usernames || []
-        };
-        setGroupSettings(updated);
-        localStorage.setItem('chat_group_settings', JSON.stringify(updated));
-        await supabase.from('group_settings').upsert(updated);
-        setMediaErrorToast(`👑 Welcome @${cleanCand}! You have been designated as the CEO of this company.`);
-        return true;
+      if (localCeo && localCeo.toLowerCase() !== 'mr saqib' && localCeo.toLowerCase() !== candLower) {
+        return false;
       }
+      if (existingOwner && existingOwner.toLowerCase() !== 'mr saqib' && existingOwner.toLowerCase() !== candLower) {
+        localStorage.setItem('chat_company_ceo', existingOwner);
+        return false;
+      }
+
+      // 2. Query Supabase group_settings
+      const { data: dbSettings } = await supabase.from('group_settings').select('*').eq('id', 1).maybeSingle();
+      const dbOwner = (dbSettings?.owner_username || '').trim();
+      if (dbOwner && dbOwner.toLowerCase() !== 'mr saqib') {
+        localStorage.setItem('chat_company_ceo', dbOwner);
+        if (dbOwner.toLowerCase() !== candLower) {
+          return false;
+        }
+      }
+
+      // 3. Query Supabase user_profiles to verify if candidate is the earliest user
+      const { data: allProfiles } = await supabase
+        .from('user_profiles')
+        .select('username, created_at')
+        .order('created_at', { ascending: true });
+
+      if (allProfiles && allProfiles.length > 0) {
+        const firstEverUser = allProfiles[0].username?.trim();
+        if (firstEverUser && firstEverUser.toLowerCase() !== candLower) {
+          localStorage.setItem('chat_company_ceo', firstEverUser);
+          if (!dbOwner || dbOwner.toLowerCase() === 'mr saqib') {
+            await supabase.from('group_settings').update({ owner_username: firstEverUser }).eq('id', 1);
+          }
+          return false;
+        }
+      }
+
+      // 4. Candidate is the verified first user!
+      const existingAdmins = (dbSettings?.admin_usernames || []).filter((u: string) => u.toLowerCase() !== 'mr saqib');
+      const updated: GroupSettings = {
+        id: 1,
+        name: dbSettings?.name || activeGroupSettings.name || 'Global Chat',
+        description: dbSettings?.description || activeGroupSettings.description || 'Welcome to the global chat room!',
+        avatar_url: dbSettings?.avatar_url || activeGroupSettings.avatar_url || null,
+        owner_username: cleanCand,
+        admin_usernames: Array.from(new Set([...existingAdmins, cleanCand])),
+        leader_usernames: dbSettings?.leader_usernames || [],
+        user_roles: {
+          ...(dbSettings?.user_roles || {}),
+          [candLower]: 'ceo'
+        },
+        banned_usernames: dbSettings?.banned_usernames || []
+      };
+
+      setGroupSettings(updated);
+      localStorage.setItem('chat_group_settings', JSON.stringify(updated));
+      localStorage.setItem('chat_company_ceo', cleanCand);
+
+      try {
+        await supabase.from('group_settings').upsert(updated);
+        await supabase.from('user_profiles').update({ role: 'ceo' }).eq('username', cleanCand);
+      } catch {}
+
+      try {
+        broadcastChannelRef.current?.postMessage({
+          type: 'ANNOUNCE_CEO',
+          payload: { owner_username: cleanCand, groupSettings: updated }
+        });
+      } catch {}
+
+      setMediaErrorToast(`👑 Welcome @${cleanCand}! You have been designated as the CEO of this company.`);
+      return true;
     } catch (err) {
       console.warn('claimCeo error:', err);
     }
@@ -408,12 +464,93 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (messages.length > 0) {
-      // Keep only the last 150 messages in local storage to prevent quota limits
-      const messagesToSave = messages.slice(-150);
-      localStorage.setItem('chat_messages', JSON.stringify(messagesToSave));
+    try {
+      if (messages.length > 0) {
+        const messagesToSave = messages.slice(-200);
+        localStorage.setItem('chat_messages', JSON.stringify(messagesToSave));
+      }
+    } catch (e) {
+      console.warn('LocalStorage save error:', e);
     }
   }, [messages]);
+
+  // Cross-tab real-time communication via BroadcastChannel
+  useEffect(() => {
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      const bc = new BroadcastChannel('global_company_chat');
+      broadcastChannelRef.current = bc;
+
+      bc.onmessage = (event) => {
+        try {
+          const { type, payload } = event.data || {};
+          if (type === 'NEW_MESSAGE' && payload) {
+            setMessages((prev) => {
+              if (prev.some((m) => m.id === payload.id)) return prev;
+              const next = [...prev, payload];
+              try {
+                localStorage.setItem('chat_messages', JSON.stringify(next.slice(-200)));
+              } catch {}
+              return next;
+            });
+            if (payload.username?.toLowerCase() !== (username || '').toLowerCase()) {
+              triggerIncomingNotification(payload);
+            }
+          } else if (type === 'DELETE_MESSAGE' && payload?.id) {
+            setMessages((prev) => prev.filter((m) => m.id !== payload.id));
+          } else if (type === 'UPDATE_MESSAGE' && payload) {
+            setMessages((prev) =>
+              prev.map((m) => (m.id === payload.id ? { ...m, ...payload } : m))
+            );
+          } else if (type === 'REACTION' && payload) {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === payload.messageId ? { ...m, reactions: payload.reactions } : m
+              )
+            );
+          } else if (type === 'ROLE_UPDATE' && payload?.updatedSettings) {
+            setGroupSettings(payload.updatedSettings);
+            try {
+              localStorage.setItem('chat_group_settings', JSON.stringify(payload.updatedSettings));
+              if (payload.updatedSettings.owner_username) {
+                localStorage.setItem('chat_company_ceo', payload.updatedSettings.owner_username);
+              }
+            } catch {}
+          } else if (type === 'KICKED_FROM_COMPANY' && payload?.username?.toLowerCase() === (username || '').toLowerCase()) {
+            handleLogout();
+            alert('You have been removed from the company by administration.');
+          } else if (type === 'WHO_IS_CEO') {
+            const knownCeo = activeGroupSettings.owner_username || localStorage.getItem('chat_company_ceo');
+            if (knownCeo) {
+              bc.postMessage({
+                type: 'ANNOUNCE_CEO',
+                payload: { owner_username: knownCeo, groupSettings: activeGroupSettings }
+              });
+            }
+          } else if (type === 'ANNOUNCE_CEO' && payload?.owner_username) {
+            localStorage.setItem('chat_company_ceo', payload.owner_username);
+            if (!activeGroupSettings.owner_username || activeGroupSettings.owner_username === 'Mr Saqib') {
+              setGroupSettings((prev) => ({
+                ...prev,
+                owner_username: payload.owner_username,
+                ...(payload.groupSettings ? payload.groupSettings : {})
+              }));
+            }
+          }
+        } catch (e) {
+          console.warn('BroadcastChannel error:', e);
+        }
+      };
+
+      // Query any existing active tab for current CEO
+      try {
+        bc.postMessage({ type: 'WHO_IS_CEO' });
+      } catch {}
+
+      return () => {
+        bc.close();
+      };
+    }
+  }, [username]);
 
   useEffect(() => {
     if (!isJoined) return;
@@ -442,6 +579,9 @@ export default function App() {
             settings.owner_username = '';
             settings.admin_usernames = (settings.admin_usernames || []).filter(u => u.toLowerCase() !== 'mr saqib');
           }
+          if (settings.owner_username) {
+            localStorage.setItem('chat_company_ceo', settings.owner_username);
+          }
           setGroupSettings(settings);
           localStorage.setItem('chat_group_settings', JSON.stringify(settings));
 
@@ -449,18 +589,26 @@ export default function App() {
             await claimCeoIfUnassigned(username);
           }
         } else if (!currentLocal) {
+          const knownCeo = localStorage.getItem('chat_company_ceo') || '';
           const initial: GroupSettings = {
             id: 1,
             name: 'Global Chat',
             description: 'Welcome to the global chat room!',
             avatar_url: null,
-            owner_username: username || '',
-            admin_usernames: username ? [username] : [],
-            leader_usernames: []
+            owner_username: knownCeo,
+            admin_usernames: [],
+            leader_usernames: [],
+            employee_usernames: username ? [username] : [],
+            intern_usernames: [],
+            user_roles: {}
           };
           setGroupSettings(initial);
           localStorage.setItem('chat_group_settings', JSON.stringify(initial));
-          await supabase.from('group_settings').upsert(initial).then();
+          if (knownCeo) {
+            await supabase.from('group_settings').upsert(initial).then();
+          } else if (username) {
+            await claimCeoIfUnassigned(username);
+          }
         }
       } catch (err) {
         console.error('Failed to fetch group settings from Supabase', err);
@@ -505,30 +653,43 @@ export default function App() {
 
     // Fetch initial messages
     const fetchMessages = async () => {
-      const cleanUsername = username.replace(/"/g, '\\"');
-      const { data, error } = await supabase
-        .from('messages')
-        .select('*')
-        .or(`recipient_username.is.null,username.ilike."${cleanUsername}",recipient_username.ilike."${cleanUsername}"`)
-        .order('created_at', { ascending: true });
-      
-      if (!error && data) {
-        // Double-check filtering on client side for bulletproof isolation
-        const filteredData = (data as Message[]).filter(m => 
-          !m.recipient_username ||
-          m.username?.toLowerCase() === username?.toLowerCase() ||
-          m.recipient_username?.toLowerCase() === username?.toLowerCase()
-        );
-        setMessages(filteredData);
+      try {
+        const cleanUsername = username.replace(/"/g, '\\"');
+        const { data, error } = await supabase
+          .from('messages')
+          .select('*')
+          .or(`recipient_username.is.null,username.ilike."${cleanUsername}",recipient_username.ilike."${cleanUsername}"`)
+          .order('created_at', { ascending: true });
         
-        // Mark as read
-        const toUpdate = filteredData.filter(msg => 
-          msg.username?.toLowerCase() !== username?.toLowerCase() && (!msg.read_by || !msg.read_by.includes(username))
-        );
-        toUpdate.forEach(async (msg) => {
-          const newReadBy = [...(msg.read_by || []), username];
-          await supabase.from('messages').update({ read_by: newReadBy }).eq('id', msg.id);
-        });
+        if (!error && data && data.length > 0) {
+          // Double-check filtering on client side for bulletproof isolation
+          const filteredData = (data as Message[]).filter(m => 
+            !m.recipient_username ||
+            m.username?.toLowerCase() === username?.toLowerCase() ||
+            m.recipient_username?.toLowerCase() === username?.toLowerCase()
+          );
+          
+          setMessages(prev => {
+            const map = new Map<string, Message>();
+            // Keep local/offline messages so they are never lost
+            prev.forEach(m => map.set(m.id, m));
+            filteredData.forEach(m => map.set(m.id, m));
+            return Array.from(map.values()).sort(
+              (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+            );
+          });
+          
+          // Mark as read
+          const toUpdate = filteredData.filter(msg => 
+            msg.username?.toLowerCase() !== username?.toLowerCase() && (!msg.read_by || !msg.read_by.includes(username))
+          );
+          toUpdate.forEach(async (msg) => {
+            const newReadBy = [...(msg.read_by || []), username];
+            await supabase.from('messages').update({ read_by: newReadBy }).eq('id', msg.id);
+          });
+        }
+      } catch (err) {
+        console.warn('Could not fetch messages from Supabase, local storage active:', err);
       }
     };
     fetchMessages();
@@ -1190,7 +1351,18 @@ export default function App() {
   };
 
   const handleDelete = async (id: string) => {
-    await supabase.from('messages').delete().eq('id', id);
+    setMessages(prev => prev.filter(m => m.id !== id));
+    try {
+      broadcastChannelRef.current?.postMessage({
+        type: 'DELETE_MESSAGE',
+        payload: { id }
+      });
+    } catch {}
+    try {
+      await supabase.from('messages').delete().eq('id', id);
+    } catch (e) {
+      console.warn('Supabase delete warning:', e);
+    }
   };
 
   const handleEdit = (msg: Message) => {
@@ -1201,13 +1373,23 @@ export default function App() {
   const saveEdit = async (e?: React.FormEvent) => {
     e?.preventDefault();
     if (editingMessageId && editContent.trim()) {
-      const { error } = await supabase.from('messages').update({ content: editContent, is_edited: true }).eq('id', editingMessageId);
-      if (error) {
-        console.error('Update failed. Please ensure you have added "is_edited" column in Supabase:', error);
-        alert(`Failed to edit: ${error.message}. Please check if the 'is_edited' column exists in your database.`);
-      } else {
-        setEditingMessageId(null);
-        setEditContent('');
+      const newText = editContent.trim();
+      setMessages(prev => prev.map(m => m.id === editingMessageId ? { ...m, content: newText, is_edited: true } : m));
+      setEditingMessageId(null);
+      setEditContent('');
+      try {
+        broadcastChannelRef.current?.postMessage({
+          type: 'UPDATE_MESSAGE',
+          payload: { id: editingMessageId, content: newText, is_edited: true }
+        });
+      } catch {}
+      try {
+        const { error } = await supabase.from('messages').update({ content: newText, is_edited: true }).eq('id', editingMessageId);
+        if (error) {
+          console.warn('Supabase edit warning (saved locally):', error);
+        }
+      } catch (err) {
+        console.warn('Supabase edit network error (saved locally):', err);
       }
     }
   };
@@ -1574,81 +1756,102 @@ export default function App() {
 
   const userLower = (username || '').trim().toLowerCase();
   const ownerLower = (activeGroupSettings.owner_username || '').trim().toLowerCase();
-  const isOwner = Boolean(userLower && ownerLower && userLower === ownerLower);
-  const isAdmin = Boolean(isOwner || (activeGroupSettings.admin_usernames || []).some(u => u.trim().toLowerCase() === userLower));
   
-  // Leader role is distinct from Admin: Only members specifically designated by Admin are Leaders
-  const isLeader = Boolean(
-    username &&
-    (activeGroupSettings.leader_usernames || []).some(
-      l => l.trim().toLowerCase() === userLower
-    )
-  );
+  // Hierarchical Role Access Control (RBAC): CEO (1) > Manager (2) > Team Lead (3) > Employee (4) > Intern (5)
+  const currentUserRole: CompanyRole = useMemo(() => {
+    return getUserRole(username, activeGroupSettings);
+  }, [username, activeGroupSettings]);
 
-  const makeLeader = async (targetUsername: string) => {
-    if (!isAdmin) return;
-    const currentLeaders = activeGroupSettings.leader_usernames || [];
-    if (currentLeaders.some(l => l.toLowerCase() === targetUsername.toLowerCase())) return;
-    const newLeaders = [...currentLeaders, targetUsername];
-    const updated = { ...activeGroupSettings, leader_usernames: newLeaders };
+  const isOwner = currentUserRole === 'ceo';
+  const isManager = currentUserRole === 'manager';
+  const isTeamLead = currentUserRole === 'team_lead';
+  const isEmployee = currentUserRole === 'employee';
+  const isIntern = currentUserRole === 'intern';
+  const isAdmin = isOwner || isManager;
+  const isLeader = isTeamLead;
+
+  // Change user role following strict tree pattern
+  const changeUserRole = async (targetUsername: string, newRole: CompanyRole) => {
+    const cleanTarget = targetUsername.trim();
+    const targetLower = cleanTarget.toLowerCase();
+    const myRole = currentUserRole;
+    const targetRole = getUserRole(cleanTarget, activeGroupSettings);
+
+    if (targetLower === ownerLower && newRole !== 'ceo') {
+      alert("The CEO role cannot be changed directly! Only the current CEO can transfer CEO ownership.");
+      return;
+    }
+
+    if (!canManageUser(myRole, targetRole)) {
+      alert(`Permission Denied: As a ${ROLE_DETAILS[myRole].title}, you cannot modify a ${ROLE_DETAILS[targetRole].title}.`);
+      return;
+    }
+
+    const allowedRoles = getAllowedAssignableRoles(myRole);
+    if (!allowedRoles.includes(newRole) && !(myRole === 'ceo' && newRole === 'ceo')) {
+      alert(`Permission Denied: As a ${ROLE_DETAILS[myRole].title}, you can only assign: ${allowedRoles.map(r => ROLE_DETAILS[r].title).join(', ')}.`);
+      return;
+    }
+
+    if (newRole === 'ceo') {
+      await transferOwnership(cleanTarget);
+      return;
+    }
+
+    const updated = applyRoleChange(activeGroupSettings, cleanTarget, newRole);
     setGroupSettings(updated);
     localStorage.setItem('chat_group_settings', JSON.stringify(updated));
+
+    // Broadcast change across tabs
+    try {
+      broadcastChannelRef.current?.postMessage({
+        type: 'ROLE_UPDATE',
+        payload: { targetUsername: cleanTarget, newRole, updatedSettings: updated }
+      });
+    } catch {}
+
     try {
       await supabase.from('group_settings').upsert(updated);
+      await supabase.from('user_profiles').update({ role: newRole }).eq('username', cleanTarget);
     } catch (err) {
-      console.error('Supabase makeLeader error:', err);
+      console.warn('Supabase role update sync (stored locally):', err);
     }
+
+    setMediaErrorToast(`Role of @${cleanTarget} set to ${ROLE_DETAILS[newRole].title} (${ROLE_DETAILS[newRole].urduTitle}).`);
   };
 
-  const dismissLeader = async (targetUsername: string) => {
-    if (!isAdmin) return;
-    const currentLeaders = activeGroupSettings.leader_usernames || [];
-    const newLeaders = currentLeaders.filter(u => u.toLowerCase() !== targetUsername.toLowerCase());
-    const updated = { ...activeGroupSettings, leader_usernames: newLeaders };
-    setGroupSettings(updated);
-    localStorage.setItem('chat_group_settings', JSON.stringify(updated));
-    try {
-      await supabase.from('group_settings').upsert(updated);
-    } catch (err) {
-      console.error('Supabase dismissLeader error:', err);
-    }
-  };
-
-  const makeAdmin = async (targetUsername: string) => {
-    if (!isOwner) return;
-    const cleanTarget = targetUsername.trim();
-    const currentAdmins = activeGroupSettings.admin_usernames || [];
-    if (currentAdmins.some(a => a.toLowerCase() === cleanTarget.toLowerCase())) return;
-    const newAdmins = [...currentAdmins, cleanTarget];
-    const updated = { ...activeGroupSettings, admin_usernames: newAdmins };
-    setGroupSettings(updated);
-    localStorage.setItem('chat_group_settings', JSON.stringify(updated));
-    await supabase.from('group_settings').upsert(updated).then();
-    setMediaErrorToast(`@${cleanTarget} has been promoted to Manager.`);
-  };
-
-  const dismissAdmin = async (targetUsername: string) => {
-    if (!isOwner) return;
-    const cleanTarget = targetUsername.trim();
-    const currentAdmins = activeGroupSettings.admin_usernames || [];
-    const newAdmins = currentAdmins.filter(u => u.toLowerCase() !== cleanTarget.toLowerCase());
-    const updated = { ...activeGroupSettings, admin_usernames: newAdmins };
-    setGroupSettings(updated);
-    localStorage.setItem('chat_group_settings', JSON.stringify(updated));
-    await supabase.from('group_settings').upsert(updated).then();
-    setMediaErrorToast(`@${cleanTarget} has been demoted to Team Member.`);
-  };
+  const makeLeader = (targetUsername: string) => changeUserRole(targetUsername, 'team_lead');
+  const dismissLeader = (targetUsername: string) => changeUserRole(targetUsername, 'employee');
+  const makeAdmin = (targetUsername: string) => changeUserRole(targetUsername, 'manager');
+  const dismissAdmin = (targetUsername: string) => changeUserRole(targetUsername, 'employee');
 
   const transferOwnership = async (targetUsername: string) => {
-    if (!isOwner) return;
+    if (!isOwner) {
+      alert("Only the current CEO can transfer company ownership!");
+      return;
+    }
     const cleanTarget = targetUsername.trim();
     if (confirm(`Are you sure you want to appoint @${cleanTarget} as the new CEO? You will remain as a Manager.`)) {
-      const currentAdmins = activeGroupSettings.admin_usernames || [];
-      const newAdmins = Array.from(new Set([...currentAdmins, username, cleanTarget]));
-      const updated = { ...activeGroupSettings, owner_username: cleanTarget, admin_usernames: newAdmins };
+      const updated = applyRoleChange(activeGroupSettings, cleanTarget, 'ceo');
       setGroupSettings(updated);
       localStorage.setItem('chat_group_settings', JSON.stringify(updated));
-      await supabase.from('group_settings').upsert(updated).then();
+      localStorage.setItem('chat_company_ceo', cleanTarget);
+
+      try {
+        broadcastChannelRef.current?.postMessage({
+          type: 'ROLE_UPDATE',
+          payload: { updatedSettings: updated }
+        });
+        broadcastChannelRef.current?.postMessage({
+          type: 'ANNOUNCE_CEO',
+          payload: { owner_username: cleanTarget, groupSettings: updated }
+        });
+      } catch {}
+
+      try {
+        await supabase.from('group_settings').upsert(updated);
+      } catch (e) {}
+
       setMediaErrorToast(`👑 CEO role has been assigned to @${cleanTarget}.`);
     }
   };
@@ -1656,6 +1859,8 @@ export default function App() {
   const removeMember = async (targetUsername: string) => {
     const cleanTarget = targetUsername.trim();
     const targetLower = cleanTarget.toLowerCase();
+    const myRole = currentUserRole;
+    const targetRole = getUserRole(cleanTarget, activeGroupSettings);
 
     if (targetLower === ownerLower) {
       alert("The CEO cannot be removed from the company!");
@@ -1667,24 +1872,13 @@ export default function App() {
       return;
     }
 
-    const isTargetManager = (activeGroupSettings.admin_usernames || []).some(a => a.toLowerCase() === targetLower);
-
-    // Permission checks:
-    // CEO can remove both Managers and Team Members.
-    // Manager can ONLY remove Team Members (cannot remove CEO or other Managers).
-    if (!isOwner) {
-      if (!isAdmin) {
-        alert("You do not have permission to remove members.");
-        return;
-      }
-      if (isTargetManager) {
-        alert("Managers cannot remove other Managers! Only the CEO can remove Managers.");
-        return;
-      }
+    if (!canManageUser(myRole, targetRole)) {
+      alert(`Permission Denied: As a ${ROLE_DETAILS[myRole].title}, you cannot remove a ${ROLE_DETAILS[targetRole].title} from the company.`);
+      return;
     }
 
-    const roleLabel = isTargetManager ? 'Manager' : 'Team Member';
-    if (!confirm(`Are you sure you want to remove ${roleLabel} @${cleanTarget} from the company? Their account and access will be revoked immediately.`)) {
+    const roleTitle = ROLE_DETAILS[targetRole].title;
+    if (!confirm(`Are you sure you want to remove ${roleTitle} @${cleanTarget} from the company? Their account and access will be revoked immediately.`)) {
       return;
     }
 
@@ -1692,21 +1886,41 @@ export default function App() {
       // 1. Delete from Supabase user_profiles table
       await supabase.from('user_profiles').delete().eq('username', cleanTarget);
 
-      // 2. Remove from admin_usernames, leader_usernames, and add to banned_usernames
+      // 2. Remove from all role lists and add to banned_usernames
       const updatedAdmins = (activeGroupSettings.admin_usernames || []).filter(u => u.toLowerCase() !== targetLower);
       const updatedLeaders = (activeGroupSettings.leader_usernames || []).filter(u => u.toLowerCase() !== targetLower);
+      const updatedEmployees = (activeGroupSettings.employee_usernames || []).filter(u => u.toLowerCase() !== targetLower);
+      const updatedInterns = (activeGroupSettings.intern_usernames || []).filter(u => u.toLowerCase() !== targetLower);
       const currentBanned = activeGroupSettings.banned_usernames || [];
       const updatedBanned = Array.from(new Set([...currentBanned, cleanTarget]));
+
+      const updatedRoles = { ...(activeGroupSettings.user_roles || {}) };
+      delete updatedRoles[targetLower];
 
       const updated: GroupSettings = {
         ...activeGroupSettings,
         admin_usernames: updatedAdmins,
         leader_usernames: updatedLeaders,
-        banned_usernames: updatedBanned
+        employee_usernames: updatedEmployees,
+        intern_usernames: updatedInterns,
+        banned_usernames: updatedBanned,
+        user_roles: updatedRoles
       };
 
       setGroupSettings(updated);
       localStorage.setItem('chat_group_settings', JSON.stringify(updated));
+
+      try {
+        broadcastChannelRef.current?.postMessage({
+          type: 'KICKED_FROM_COMPANY',
+          payload: { username: cleanTarget }
+        });
+        broadcastChannelRef.current?.postMessage({
+          type: 'ROLE_UPDATE',
+          payload: { updatedSettings: updated }
+        });
+      } catch {}
+
       await supabase.from('group_settings').upsert(updated);
 
       // 3. Update local state
@@ -1716,7 +1930,7 @@ export default function App() {
         setViewProfileUser(null);
       }
 
-      setMediaErrorToast(`@${cleanTarget} has been removed from the company.`);
+      setMediaErrorToast(`@${cleanTarget} (${roleTitle}) has been removed from the company.`);
     } catch (err: any) {
       console.error('Error removing member:', err);
       alert(`Failed to remove member: ${err?.message || 'Unknown error'}`);
@@ -1726,18 +1940,21 @@ export default function App() {
   const isBanned = !isOwner && (activeGroupSettings.banned_usernames || []).some(u => u.trim().toLowerCase() === userLower);
 
   const banUser = async (targetUsername: string) => {
-    if (!isAdmin) return;
     const cleanTarget = targetUsername.trim();
     const targetLower = cleanTarget.toLowerCase();
+    const myRole = currentUserRole;
+    const targetRole = getUserRole(cleanTarget, activeGroupSettings);
+
     if (targetLower === ownerLower) {
       alert("The CEO cannot be banned!");
       return;
     }
-    const isTargetManager = (activeGroupSettings.admin_usernames || []).some(a => a.toLowerCase() === targetLower);
-    if (!isOwner && isTargetManager) {
-      alert("Managers cannot ban other Managers! Only the CEO can ban Managers.");
+
+    if (!canManageUser(myRole, targetRole)) {
+      alert(`Permission Denied: As a ${ROLE_DETAILS[myRole].title}, you cannot ban a ${ROLE_DETAILS[targetRole].title}.`);
       return;
     }
+
     if (confirm(`Are you sure you want to BAN @${cleanTarget}? They will be blocked from sending or viewing chat messages.`)) {
       const currentBanned = activeGroupSettings.banned_usernames || [];
       if (currentBanned.some(b => b.toLowerCase() === targetLower)) return;
@@ -1751,6 +1968,10 @@ export default function App() {
       localStorage.setItem('chat_group_settings', JSON.stringify(updated));
 
       try {
+        broadcastChannelRef.current?.postMessage({
+          type: 'ROLE_UPDATE',
+          payload: { updatedSettings: updated }
+        });
         await supabase.from('group_settings').upsert(updated);
         setMediaErrorToast(`@${cleanTarget} has been banned.`);
       } catch (err) {
@@ -1760,8 +1981,15 @@ export default function App() {
   };
 
   const unbanUser = async (targetUsername: string) => {
-    if (!isAdmin) return;
     const cleanTarget = targetUsername.trim();
+    const myRole = currentUserRole;
+    const targetRole = getUserRole(cleanTarget, activeGroupSettings);
+
+    if (!canManageUser(myRole, targetRole)) {
+      alert(`Permission Denied: As a ${ROLE_DETAILS[myRole].title}, you cannot unban a ${ROLE_DETAILS[targetRole].title}.`);
+      return;
+    }
+
     const currentBanned = activeGroupSettings.banned_usernames || [];
     const newBanned = currentBanned.filter(b => b.toLowerCase() !== cleanTarget.toLowerCase());
     const currentAppeals = activeGroupSettings.ban_appeals || [];
@@ -1776,10 +2004,38 @@ export default function App() {
     localStorage.setItem('chat_group_settings', JSON.stringify(updated));
 
     try {
+      broadcastChannelRef.current?.postMessage({
+        type: 'ROLE_UPDATE',
+        payload: { updatedSettings: updated }
+      });
       await supabase.from('group_settings').upsert(updated);
+      setMediaErrorToast(`@${cleanTarget} unbanned.`);
     } catch (err) {
       console.error('Supabase unbanUser sync error:', err);
     }
+  };
+
+  const renderRoleBadge = (targetUsername?: string | null, size: 'sm' | 'md' = 'sm') => {
+    if (!targetUsername) return null;
+    const role = getUserRole(targetUsername, activeGroupSettings);
+    const details = ROLE_DETAILS[role];
+    return (
+      <span 
+        title={`${details.title} (${details.urduTitle}) - Hierarchy Level ${details.level}`}
+        className={cn(
+          "inline-flex items-center gap-1 font-bold rounded-full border shadow-xs whitespace-nowrap",
+          size === 'sm' ? "text-[9px] px-1.5 py-0.5" : "text-[10px] px-2 py-0.5",
+          details.badgeClass
+        )}
+      >
+        {role === 'ceo' && <Crown className={size === 'sm' ? "w-2.5 h-2.5 text-amber-400" : "w-3 h-3 text-amber-400"} />}
+        {role === 'manager' && <Shield className={size === 'sm' ? "w-2.5 h-2.5 text-cyan-400" : "w-3 h-3 text-cyan-400"} />}
+        {role === 'team_lead' && <ShieldCheck className={size === 'sm' ? "w-2.5 h-2.5 text-purple-400" : "w-3 h-3 text-purple-400"} />}
+        {role === 'employee' && <Briefcase className={size === 'sm' ? "w-2.5 h-2.5 text-blue-400" : "w-3 h-3 text-blue-400"} />}
+        {role === 'intern' && <GraduationCap className={size === 'sm' ? "w-2.5 h-2.5 text-slate-400" : "w-3 h-3 text-slate-400"} />}
+        <span>{details.title}</span>
+      </span>
+    );
   };
 
   const handleBanAppealSubmit = async (e: React.FormEvent) => {
@@ -1817,9 +2073,14 @@ export default function App() {
   };
 
   const dismissAppeal = async (targetUsername: string) => {
-    if (!isAdmin) return;
+    const cleanTarget = targetUsername.trim();
+    const targetRole = getUserRole(cleanTarget, activeGroupSettings);
+    if (!canManageUser(currentUserRole, targetRole)) {
+      alert(`Permission Denied: As a ${ROLE_DETAILS[currentUserRole].title}, you cannot dismiss requests for a ${ROLE_DETAILS[targetRole].title}.`);
+      return;
+    }
     const currentAppeals = activeGroupSettings.ban_appeals || [];
-    const newAppeals = currentAppeals.filter(a => a.username.toLowerCase() !== targetUsername.toLowerCase());
+    const newAppeals = currentAppeals.filter(a => a.username.toLowerCase() !== cleanTarget.toLowerCase());
 
     const updated: GroupSettings = {
       ...activeGroupSettings,
@@ -2187,36 +2448,56 @@ export default function App() {
 
       if (cloudRes.secure_url || cloudRes.url) {
         const finalUrl = cloudRes.secure_url || cloudRes.url;
+        const uploadedMsg = { ...tempMessage, content: finalUrl, status: 'sent' as const };
 
-        const { data, error } = await supabase.from('messages').insert([
-          {
-            type: msgType,
-            content: finalUrl,
-            file_name: fileName,
-            file_size: fileSize,
-            username,
-            recipient_username: activePrivateUser || null,
-            avatar: currentSenderAvatar,
-            read_by: [],
-            reply_to: replyData
+        try {
+          broadcastChannelRef.current?.postMessage({
+            type: 'NEW_MESSAGE',
+            payload: uploadedMsg
+          });
+        } catch {}
+
+        try {
+          const { data, error } = await supabase.from('messages').insert([
+            {
+              type: msgType,
+              content: finalUrl,
+              file_name: fileName,
+              file_size: fileSize,
+              username,
+              recipient_username: activePrivateUser || null,
+              avatar: currentSenderAvatar,
+              read_by: [],
+              reply_to: replyData
+            }
+          ]).select('*');
+
+          if (error) {
+            console.warn('Supabase media message insert warning:', error);
           }
-        ]).select('*');
 
-        if (error) {
-          console.error('Supabase message insert error:', error);
-        }
-
-        if (data && data[0]) {
-          const realMessage = data[0] as Message;
-          setMessages(prev => prev.map(m => m.id === tempId ? realMessage : m));
-        } else {
-          setMessages(prev => prev.map(m => m.id === tempId ? { ...m, content: finalUrl } : m));
+          if (data && data[0]) {
+            const realMessage = data[0] as Message;
+            setMessages(prev => prev.map(m => m.id === tempId ? realMessage : m));
+          } else {
+            setMessages(prev => prev.map(m => m.id === tempId ? uploadedMsg : m));
+          }
+        } catch (dbErr) {
+          console.warn('Supabase media message sync offline, kept locally:', dbErr);
+          setMessages(prev => prev.map(m => m.id === tempId ? uploadedMsg : m));
         }
       }
     } catch (err) {
-      console.error('Media upload error:', err);
-      alert(`Upload failed: ${(err as Error).message || 'Failed to upload file'}`);
-      setMessages(prev => prev.filter(m => m.id !== tempId));
+      console.warn('Media upload error:', err);
+      try {
+        const localBlobUrl = URL.createObjectURL(file);
+        const fallbackMsg = { ...tempMessage, content: localBlobUrl, status: 'sent' as const };
+        setMessages(prev => prev.map(m => m.id === tempId ? fallbackMsg : m));
+        setMediaErrorToast(`File saved locally. Cloud upload status: ${(err as Error).message || 'Offline mode'}`);
+      } catch {
+        setMessages(prev => prev.filter(m => m.id !== tempId));
+        alert(`Upload failed: ${(err as Error).message || 'Failed to upload file'}`);
+      }
     } finally {
       setIsUploadingMedia(false);
       setUploadProgressText('');
@@ -2228,9 +2509,12 @@ export default function App() {
     statsRef.current.messages++;
     
     const currentSenderAvatar = userAvatar || getAvatarForUser(username) || localStorage.getItem('chat_avatar') || '';
+    const forwardId = typeof crypto !== 'undefined' && crypto.randomUUID
+      ? crypto.randomUUID()
+      : `fwd-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
     const newMessage: Message = {
-      id: `temp-${Date.now()}`,
+      id: forwardId,
       created_at: new Date().toISOString(),
       type: forwardingMessage.type,
       content: forwardingMessage.content,
@@ -2242,16 +2526,35 @@ export default function App() {
       file_size: forwardingMessage.file_size
     };
 
-    setMessages((prev) => [...prev, newMessage]);
+    setMessages((prev) => {
+      const next = [...prev, newMessage];
+      try {
+        localStorage.setItem('chat_messages', JSON.stringify(next.slice(-200)));
+      } catch {}
+      return next;
+    });
     setShowForwardModal(false);
     setForwardingMessage(null);
+
+    try {
+      broadcastChannelRef.current?.postMessage({
+        type: 'NEW_MESSAGE',
+        payload: newMessage
+      });
+    } catch {}
     
     const { id, ...messagePayload } = newMessage;
-    const { data, error } = await supabase.from('messages').insert([messagePayload]).select();
-    if (data && data.length > 0) {
-      setMessages(prev => prev.map(m => m.id === newMessage.id ? data[0] : m));
-    } else {
-      setMessages(prev => prev.filter(m => m.id !== newMessage.id));
+    try {
+      const { data, error } = await supabase.from('messages').insert([messagePayload]).select();
+      if (data && data.length > 0) {
+        setMessages(prev => prev.map(m => m.id === newMessage.id ? (data[0] as Message) : m));
+      } else {
+        console.warn('Supabase forward message error, message preserved locally:', error);
+        setMessages(prev => prev.map(m => m.id === newMessage.id ? { ...m, status: 'sent' } : m));
+      }
+    } catch (err) {
+      console.warn('Supabase offline or forward error, message preserved locally:', err);
+      setMessages(prev => prev.map(m => m.id === newMessage.id ? { ...m, status: 'sent' } : m));
     }
   };
 
@@ -2274,6 +2577,13 @@ export default function App() {
     setMessages(prev => prev.map(m => m.id === messageId ? { ...m, reactions: newReactions } : m));
     
     try {
+      broadcastChannelRef.current?.postMessage({
+        type: 'REACTION',
+        payload: { messageId, reactions: newReactions }
+      });
+    } catch {}
+
+    try {
       await supabase.from('messages').update({ reactions: newReactions }).eq('id', messageId);
     } catch (err) {
       console.error('Reaction failed:', err);
@@ -2290,7 +2600,10 @@ export default function App() {
       }
       sendTypingStatus(false);
 
-      const tempId = `temp-${Date.now()}`;
+      const messageContent = inputMessage.trim();
+      const messageId = typeof crypto !== 'undefined' && crypto.randomUUID
+        ? crypto.randomUUID()
+        : `msg-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
       
       const replyData = replyingTo ? {
         id: replyingTo.id,
@@ -2303,9 +2616,9 @@ export default function App() {
       const currentSenderAvatar = userAvatar || getAvatarForUser(username) || localStorage.getItem('chat_avatar') || '';
 
       const newMessage: Message = {
-        id: tempId,
+        id: messageId,
         type: 'text',
-        content: inputMessage,
+        content: messageContent,
         username,
         recipient_username: activePrivateUser || null,
         avatar: currentSenderAvatar,
@@ -2314,32 +2627,58 @@ export default function App() {
         reply_to: replyData
       };
       
-      setMessages(prev => [...prev, newMessage]);
+      // 1. Immediately update state and localStorage so the message appears instantly and is NEVER lost
+      setMessages(prev => {
+        const next = [...prev, newMessage];
+        try {
+          localStorage.setItem('chat_messages', JSON.stringify(next.slice(-200)));
+        } catch {}
+        return next;
+      });
       setInputMessage('');
       setReplyingTo(null);
 
-      const { data, error } = await supabase.from('messages').insert([
-        {
-          type: 'text',
-          content: newMessage.content,
-          username: newMessage.username,
-          recipient_username: activePrivateUser || null,
-          avatar: currentSenderAvatar,
-          read_by: [],
-          reply_to: replyData
-        }
-      ]).select('*');
-
-      if (data && data[0]) {
-        const realMessage = data[0] as Message;
-        setMessages(prev => {
-          if (prev.some(m => m.id === realMessage.id)) {
-            return prev.filter(m => m.id !== tempId);
-          }
-          return prev.map(m => m.id === tempId ? realMessage : m);
+      // 2. Broadcast across tabs in real-time
+      try {
+        broadcastChannelRef.current?.postMessage({
+          type: 'NEW_MESSAGE',
+          payload: newMessage
         });
-      } else {
-        setMessages(prev => prev.filter(m => m.id !== tempId));
+      } catch (bcErr) {
+        console.warn('BroadcastChannel error:', bcErr);
+      }
+
+      // 3. Try Supabase cloud sync
+      try {
+        const { data, error } = await supabase.from('messages').insert([
+          {
+            type: 'text',
+            content: newMessage.content,
+            username: newMessage.username,
+            recipient_username: activePrivateUser || null,
+            avatar: currentSenderAvatar,
+            read_by: [],
+            reply_to: replyData
+          }
+        ]).select('*');
+
+        if (data && data[0]) {
+          const realMessage = data[0] as Message;
+          setMessages(prev => {
+            if (prev.some(m => m.id === realMessage.id)) {
+              return prev.filter(m => m.id !== messageId);
+            }
+            return prev.map(m => m.id === messageId ? realMessage : m);
+          });
+        } else {
+          // If Supabase has an error or table schema mismatch, keep the message locally!
+          console.warn('Supabase sync notice (message preserved locally):', error);
+          setMessages(prev => prev.map(m => m.id === messageId ? { ...m, status: 'sent' } : m));
+        }
+      } catch (err) {
+        // Network / offline error: Keep message locally, NEVER delete it!
+        console.warn('Supabase offline or network error, message preserved locally:', err);
+        setMessages(prev => prev.map(m => m.id === messageId ? { ...m, status: 'sent' } : m));
       }
     }
   };

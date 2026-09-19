@@ -23,6 +23,16 @@ export interface Message {
   reactions?: Record<string, string[]>;
 }
 
+export type CompanyRole = 'ceo' | 'manager' | 'team_lead' | 'employee' | 'intern';
+
+export const ROLE_HIERARCHY: Record<CompanyRole, number> = {
+  ceo: 1,
+  manager: 2,
+  team_lead: 3,
+  employee: 4,
+  intern: 5,
+};
+
 export interface UserProfile {
   id?: string;
   username: string;
@@ -31,6 +41,7 @@ export interface UserProfile {
   bio?: string;
   password?: string;
   avatar_url?: string;
+  role?: CompanyRole;
   last_seen?: string;
   blocked_usernames?: string[];
 }
@@ -55,6 +66,9 @@ export interface GroupSettings {
   owner_username: string;
   admin_usernames: string[];
   leader_usernames?: string[];
+  employee_usernames?: string[];
+  intern_usernames?: string[];
+  user_roles?: Record<string, CompanyRole>;
   banned_usernames?: string[];
   ban_appeals?: BanAppeal[];
 }
