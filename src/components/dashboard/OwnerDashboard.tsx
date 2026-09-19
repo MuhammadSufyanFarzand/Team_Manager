@@ -187,7 +187,7 @@ export function OwnerDashboard({
                 </h1>
                 <span className="bg-gradient-to-r from-amber-500/20 to-purple-500/20 text-amber-300 border border-amber-500/30 text-[10px] sm:text-xs px-2 sm:px-2.5 py-0.5 rounded-full font-bold flex items-center gap-1 shrink-0">
                   <ShieldCheck className="w-3 h-3 text-amber-300" />
-                  <span>{isOwner ? 'Owner' : 'Admin'}</span>
+                  <span>{isOwner ? 'CEO' : 'Manager'}</span>
                 </span>
               </div>
               <p className="text-[10px] sm:text-xs text-white/50 truncate hidden sm:block">

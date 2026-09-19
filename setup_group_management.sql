@@ -8,5 +8,5 @@ CREATE TABLE IF NOT EXISTS group_settings (
 );
 
 INSERT INTO group_settings (id, name, description, owner_username) 
-VALUES (1, 'Global Chat', 'Welcome to the global chat room!', 'mr saqib') 
+VALUES (1, 'Global Chat', 'Welcome to the global chat room!', NULL) 
 ON CONFLICT (id) DO NOTHING;

@@ -5,7 +5,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { supabase } from './supabase';
 import { Message, GroupSettings, UserProfile, OnlineUser, BanAppeal, MessageType, UserDailyStats } from './types';
-import { Send, Image as ImageIcon, User, Bell, BellOff, BellRing, Volume2, VolumeX, Edit2, Trash2, Check, CheckCheck, X, Info, Copy, ExternalLink, Reply, Settings, Camera, Loader2, Shield, ShieldAlert, Crown, Users, Lock, Mail, Phone, FileText, LogOut, Eye, EyeOff, Clock, Circle, Ban, UserX, UserCheck, AlertTriangle, Mic, MicOff, Play, Pause, Download, Video as VideoIcon, Music, Paperclip, Plus, FileArchive, Star, Sparkles, ShoppingBag, Gift, Activity, BarChart2, Search, Forward, SmilePlus, PhoneCall, PhoneOff, Briefcase, MoreVertical, ArrowLeft } from 'lucide-react';
+import { Send, Image as ImageIcon, User, Bell, BellOff, BellRing, Volume2, VolumeX, Edit2, Trash2, Check, CheckCheck, X, Info, Copy, ExternalLink, Reply, Settings, Camera, Loader2, Shield, ShieldAlert, Crown, Users, Lock, Mail, Phone, FileText, LogOut, Eye, EyeOff, Clock, Circle, Ban, UserX, UserCheck, UserMinus, AlertTriangle, Mic, MicOff, Play, Pause, Download, Video as VideoIcon, Music, Paperclip, Plus, FileArchive, Star, Sparkles, ShoppingBag, Gift, Activity, BarChart2, Search, Forward, SmilePlus, PhoneCall, PhoneOff, Briefcase, MoreVertical, ArrowLeft } from 'lucide-react';
 import { uploadToCloudinary, getCloudinaryDownloadUrl } from './lib/cloudinary';
 import { LeadManagement } from './components/LeadManagement';
 import { OwnerDashboard } from './components/dashboard/OwnerDashboard';
@@ -135,8 +135,8 @@ export default function App() {
       name: 'Global Chat',
       description: 'Welcome to the global chat room!',
       avatar_url: null,
-      owner_username: 'mr saqib',
-      admin_usernames: ['mr saqib'],
+      owner_username: '',
+      admin_usernames: [],
       leader_usernames: []
     };
   }, [groupSettings]);
@@ -193,9 +193,54 @@ export default function App() {
   // Voice Recording states
   const [isRecording, setIsRecording] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
+  const [mediaErrorToast, setMediaErrorToast] = useState<string | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const recordingTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Auto-dismiss media error notice
+  useEffect(() => {
+    if (mediaErrorToast) {
+      const timer = setTimeout(() => {
+        setMediaErrorToast(null);
+      }, 7000);
+      return () => clearTimeout(timer);
+    }
+  }, [mediaErrorToast]);
+
+  // Dynamically assign the first registering or logging in user as CEO of the company
+  const claimCeoIfUnassigned = async (candidateUsername: string): Promise<boolean> => {
+    const cleanCand = candidateUsername.trim();
+    if (!cleanCand) return false;
+
+    try {
+      const { data } = await supabase.from('group_settings').select('*').eq('id', 1).maybeSingle();
+      const currentOwner = (data?.owner_username || activeGroupSettings.owner_username || '').trim();
+      const isUnclaimed = !currentOwner || currentOwner.toLowerCase() === 'mr saqib';
+
+      if (isUnclaimed) {
+        const existingAdmins = (data?.admin_usernames || []).filter((u: string) => u.toLowerCase() !== 'mr saqib');
+        const updated: GroupSettings = {
+          id: 1,
+          name: data?.name || activeGroupSettings.name || 'Global Chat',
+          description: data?.description || activeGroupSettings.description || 'Welcome to the global chat room!',
+          avatar_url: data?.avatar_url || activeGroupSettings.avatar_url || null,
+          owner_username: cleanCand,
+          admin_usernames: Array.from(new Set([...existingAdmins, cleanCand])),
+          leader_usernames: data?.leader_usernames || [],
+          banned_usernames: data?.banned_usernames || []
+        };
+        setGroupSettings(updated);
+        localStorage.setItem('chat_group_settings', JSON.stringify(updated));
+        await supabase.from('group_settings').upsert(updated);
+        setMediaErrorToast(`👑 Welcome @${cleanCand}! You have been designated as the CEO of this company.`);
+        return true;
+      }
+    } catch (err) {
+      console.warn('claimCeo error:', err);
+    }
+    return false;
+  };
 
   // PWA (Progressive Web App) States
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
@@ -379,23 +424,39 @@ export default function App() {
       if (local) {
         try {
           currentLocal = JSON.parse(local);
-          if (currentLocal) setGroupSettings(currentLocal);
+          if (currentLocal) {
+            if (currentLocal.owner_username?.toLowerCase() === 'mr saqib') {
+              currentLocal.owner_username = '';
+              currentLocal.admin_usernames = (currentLocal.admin_usernames || []).filter(u => u.toLowerCase() !== 'mr saqib');
+            }
+            setGroupSettings(currentLocal);
+          }
         } catch (e) {}
       }
 
       try {
-        const { data, error } = await supabase.from('group_settings').select('*').eq('id', 1).single();
+        const { data, error } = await supabase.from('group_settings').select('*').eq('id', 1).maybeSingle();
         if (!error && data) {
-          setGroupSettings(data as GroupSettings);
-          localStorage.setItem('chat_group_settings', JSON.stringify(data));
+          const settings = data as GroupSettings;
+          if (settings.owner_username?.toLowerCase() === 'mr saqib') {
+            settings.owner_username = '';
+            settings.admin_usernames = (settings.admin_usernames || []).filter(u => u.toLowerCase() !== 'mr saqib');
+          }
+          setGroupSettings(settings);
+          localStorage.setItem('chat_group_settings', JSON.stringify(settings));
+
+          if ((!settings.owner_username || settings.owner_username.trim() === '') && username) {
+            await claimCeoIfUnassigned(username);
+          }
         } else if (!currentLocal) {
           const initial: GroupSettings = {
             id: 1,
             name: 'Global Chat',
             description: 'Welcome to the global chat room!',
             avatar_url: null,
-            owner_username: 'mr saqib',
-            admin_usernames: ['mr saqib']
+            owner_username: username || '',
+            admin_usernames: username ? [username] : [],
+            leader_usernames: []
           };
           setGroupSettings(initial);
           localStorage.setItem('chat_group_settings', JSON.stringify(initial));
@@ -823,8 +884,19 @@ export default function App() {
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       sendSignal(targetUser, 'offer', offer, type);
-    } catch (err) {
-      console.error('Error starting call', err);
+    } catch (err: any) {
+      const isPermissionDenied = err?.name === 'NotAllowedError' || 
+        err?.name === 'PermissionDeniedError' || 
+        err?.name === 'SecurityError' ||
+        err?.message?.toLowerCase().includes('permission') || 
+        err?.message?.toLowerCase().includes('denied');
+
+      console.warn('Media call notice:', err?.message || err);
+      if (isPermissionDenied) {
+        setMediaErrorToast('Microphone or camera permission was denied. Please allow device permissions in your browser or open the app in a new tab.');
+      } else {
+        setMediaErrorToast(`Could not start call: ${err?.message || 'Device error'}`);
+      }
       endCall();
     }
   };
@@ -862,8 +934,19 @@ export default function App() {
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       sendSignal(targetUser, 'answer', answer);
-    } catch (err) {
-      console.error('Error accepting call', err);
+    } catch (err: any) {
+      const isPermissionDenied = err?.name === 'NotAllowedError' || 
+        err?.name === 'PermissionDeniedError' || 
+        err?.name === 'SecurityError' ||
+        err?.message?.toLowerCase().includes('permission') || 
+        err?.message?.toLowerCase().includes('denied');
+
+      console.warn('Accept call notice:', err?.message || err);
+      if (isPermissionDenied) {
+        setMediaErrorToast('Microphone or camera permission was denied. Please allow device permissions in your browser or open the app in a new tab.');
+      } else {
+        setMediaErrorToast(`Could not connect call: ${err?.message || 'Device error'}`);
+      }
       endCall();
     }
   };
@@ -1177,6 +1260,7 @@ export default function App() {
 
         setIsJoined(true);
         requestNotificationPermission();
+        await claimCeoIfUnassigned(foundUser.username);
       } else {
         // Fallback or quick enter with username
         setUsername(idClean);
@@ -1197,6 +1281,7 @@ export default function App() {
 
         setIsJoined(true);
         requestNotificationPermission();
+        await claimCeoIfUnassigned(idClean);
       }
     } catch (err) {
       // If table doesn't exist yet or query failed, login directly
@@ -1204,6 +1289,7 @@ export default function App() {
       localStorage.setItem('chat_username', idClean);
       setIsJoined(true);
       requestNotificationPermission();
+      await claimCeoIfUnassigned(idClean);
     } finally {
       setIsAuthenticating(false);
     }
@@ -1273,10 +1359,9 @@ export default function App() {
       // Save to Supabase user_profiles
       await supabase.from('user_profiles').upsert(newProf).then();
 
-
-
       setIsJoined(true);
       requestNotificationPermission();
+      await claimCeoIfUnassigned(uClean);
     } catch (err) {
       console.error('Registration failed:', err);
       setAuthError('An error occurred during registration. Please try again.');
@@ -1488,9 +1573,9 @@ export default function App() {
   };
 
   const userLower = (username || '').trim().toLowerCase();
-  const ownerLower = (activeGroupSettings.owner_username || 'mr saqib').trim().toLowerCase();
-  const isOwner = userLower === ownerLower || userLower === 'mr saqib';
-  const isAdmin = isOwner || (activeGroupSettings.admin_usernames || []).some(u => u.trim().toLowerCase() === userLower);
+  const ownerLower = (activeGroupSettings.owner_username || '').trim().toLowerCase();
+  const isOwner = Boolean(userLower && ownerLower && userLower === ownerLower);
+  const isAdmin = Boolean(isOwner || (activeGroupSettings.admin_usernames || []).some(u => u.trim().toLowerCase() === userLower));
   
   // Leader role is distinct from Admin: Only members specifically designated by Admin are Leaders
   const isLeader = Boolean(
@@ -1531,34 +1616,110 @@ export default function App() {
 
   const makeAdmin = async (targetUsername: string) => {
     if (!isOwner) return;
+    const cleanTarget = targetUsername.trim();
     const currentAdmins = activeGroupSettings.admin_usernames || [];
-    if (currentAdmins.some(a => a.toLowerCase() === targetUsername.toLowerCase())) return;
-    const newAdmins = [...currentAdmins, targetUsername];
+    if (currentAdmins.some(a => a.toLowerCase() === cleanTarget.toLowerCase())) return;
+    const newAdmins = [...currentAdmins, cleanTarget];
     const updated = { ...activeGroupSettings, admin_usernames: newAdmins };
     setGroupSettings(updated);
     localStorage.setItem('chat_group_settings', JSON.stringify(updated));
     await supabase.from('group_settings').upsert(updated).then();
+    setMediaErrorToast(`@${cleanTarget} has been promoted to Manager.`);
   };
 
   const dismissAdmin = async (targetUsername: string) => {
     if (!isOwner) return;
+    const cleanTarget = targetUsername.trim();
     const currentAdmins = activeGroupSettings.admin_usernames || [];
-    const newAdmins = currentAdmins.filter(u => u.toLowerCase() !== targetUsername.toLowerCase());
+    const newAdmins = currentAdmins.filter(u => u.toLowerCase() !== cleanTarget.toLowerCase());
     const updated = { ...activeGroupSettings, admin_usernames: newAdmins };
     setGroupSettings(updated);
     localStorage.setItem('chat_group_settings', JSON.stringify(updated));
     await supabase.from('group_settings').upsert(updated).then();
+    setMediaErrorToast(`@${cleanTarget} has been demoted to Team Member.`);
   };
 
   const transferOwnership = async (targetUsername: string) => {
     if (!isOwner) return;
-    if (confirm(`Are you sure you want to transfer ownership to ${targetUsername}? You will become a regular admin.`)) {
+    const cleanTarget = targetUsername.trim();
+    if (confirm(`Are you sure you want to appoint @${cleanTarget} as the new CEO? You will remain as a Manager.`)) {
       const currentAdmins = activeGroupSettings.admin_usernames || [];
-      const newAdmins = Array.from(new Set([...currentAdmins, username]));
-      const updated = { ...activeGroupSettings, owner_username: targetUsername, admin_usernames: newAdmins };
+      const newAdmins = Array.from(new Set([...currentAdmins, username, cleanTarget]));
+      const updated = { ...activeGroupSettings, owner_username: cleanTarget, admin_usernames: newAdmins };
       setGroupSettings(updated);
       localStorage.setItem('chat_group_settings', JSON.stringify(updated));
       await supabase.from('group_settings').upsert(updated).then();
+      setMediaErrorToast(`👑 CEO role has been assigned to @${cleanTarget}.`);
+    }
+  };
+
+  const removeMember = async (targetUsername: string) => {
+    const cleanTarget = targetUsername.trim();
+    const targetLower = cleanTarget.toLowerCase();
+
+    if (targetLower === ownerLower) {
+      alert("The CEO cannot be removed from the company!");
+      return;
+    }
+
+    if (targetLower === userLower) {
+      alert("You cannot remove yourself!");
+      return;
+    }
+
+    const isTargetManager = (activeGroupSettings.admin_usernames || []).some(a => a.toLowerCase() === targetLower);
+
+    // Permission checks:
+    // CEO can remove both Managers and Team Members.
+    // Manager can ONLY remove Team Members (cannot remove CEO or other Managers).
+    if (!isOwner) {
+      if (!isAdmin) {
+        alert("You do not have permission to remove members.");
+        return;
+      }
+      if (isTargetManager) {
+        alert("Managers cannot remove other Managers! Only the CEO can remove Managers.");
+        return;
+      }
+    }
+
+    const roleLabel = isTargetManager ? 'Manager' : 'Team Member';
+    if (!confirm(`Are you sure you want to remove ${roleLabel} @${cleanTarget} from the company? Their account and access will be revoked immediately.`)) {
+      return;
+    }
+
+    try {
+      // 1. Delete from Supabase user_profiles table
+      await supabase.from('user_profiles').delete().eq('username', cleanTarget);
+
+      // 2. Remove from admin_usernames, leader_usernames, and add to banned_usernames
+      const updatedAdmins = (activeGroupSettings.admin_usernames || []).filter(u => u.toLowerCase() !== targetLower);
+      const updatedLeaders = (activeGroupSettings.leader_usernames || []).filter(u => u.toLowerCase() !== targetLower);
+      const currentBanned = activeGroupSettings.banned_usernames || [];
+      const updatedBanned = Array.from(new Set([...currentBanned, cleanTarget]));
+
+      const updated: GroupSettings = {
+        ...activeGroupSettings,
+        admin_usernames: updatedAdmins,
+        leader_usernames: updatedLeaders,
+        banned_usernames: updatedBanned
+      };
+
+      setGroupSettings(updated);
+      localStorage.setItem('chat_group_settings', JSON.stringify(updated));
+      await supabase.from('group_settings').upsert(updated);
+
+      // 3. Update local state
+      setGroupMembers(prev => prev.filter(m => m.username.toLowerCase() !== targetLower));
+
+      if (viewProfileUser && viewProfileUser.username.toLowerCase() === targetLower) {
+        setViewProfileUser(null);
+      }
+
+      setMediaErrorToast(`@${cleanTarget} has been removed from the company.`);
+    } catch (err: any) {
+      console.error('Error removing member:', err);
+      alert(`Failed to remove member: ${err?.message || 'Unknown error'}`);
     }
   };
 
@@ -1567,13 +1728,19 @@ export default function App() {
   const banUser = async (targetUsername: string) => {
     if (!isAdmin) return;
     const cleanTarget = targetUsername.trim();
-    if (cleanTarget.toLowerCase() === ownerLower || cleanTarget.toLowerCase() === 'mr saqib') {
-      alert("The group owner cannot be banned!");
+    const targetLower = cleanTarget.toLowerCase();
+    if (targetLower === ownerLower) {
+      alert("The CEO cannot be banned!");
+      return;
+    }
+    const isTargetManager = (activeGroupSettings.admin_usernames || []).some(a => a.toLowerCase() === targetLower);
+    if (!isOwner && isTargetManager) {
+      alert("Managers cannot ban other Managers! Only the CEO can ban Managers.");
       return;
     }
     if (confirm(`Are you sure you want to BAN @${cleanTarget}? They will be blocked from sending or viewing chat messages.`)) {
       const currentBanned = activeGroupSettings.banned_usernames || [];
-      if (currentBanned.some(b => b.toLowerCase() === cleanTarget.toLowerCase())) return;
+      if (currentBanned.some(b => b.toLowerCase() === targetLower)) return;
       
       const newBanned = [...currentBanned, cleanTarget];
       const updated: GroupSettings = {
@@ -1585,6 +1752,7 @@ export default function App() {
 
       try {
         await supabase.from('group_settings').upsert(updated);
+        setMediaErrorToast(`@${cleanTarget} has been banned.`);
       } catch (err) {
         console.error('Supabase banUser sync error:', err);
       }
@@ -1669,8 +1837,8 @@ export default function App() {
 
   const blockUser = (targetUsername: string) => {
     const cleanTarget = targetUsername.trim();
-    if (cleanTarget.toLowerCase() === ownerLower || cleanTarget.toLowerCase() === 'mr saqib') {
-      alert("You cannot block the group owner!");
+    if (cleanTarget.toLowerCase() === ownerLower) {
+      alert("You cannot block the company CEO!");
       return;
     }
     if (cleanTarget.toLowerCase() === username.toLowerCase()) {
@@ -1886,7 +2054,7 @@ export default function App() {
   // Voice Note Recording Functions
   const startVoiceRecording = async () => {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      alert('Voice recording is not supported in this browser environment.');
+      setMediaErrorToast('Voice recording is not supported in this browser environment.');
       return;
     }
 
@@ -1920,11 +2088,17 @@ export default function App() {
         setRecordingTime(prev => prev + 1);
       }, 1000);
     } catch (err: any) {
-      console.error('Microphone error:', err);
-      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError' || err.message?.includes('Permission denied')) {
-        alert('Microphone permission was denied. Please allow microphone access in your browser address bar settings or try opening the app in a new tab.');
+      const isPermissionDenied = err?.name === 'NotAllowedError' || 
+        err?.name === 'PermissionDeniedError' || 
+        err?.name === 'SecurityError' ||
+        err?.message?.toLowerCase().includes('permission') || 
+        err?.message?.toLowerCase().includes('denied');
+
+      console.warn('Microphone access notice:', err?.message || err);
+      if (isPermissionDenied) {
+        setMediaErrorToast('Microphone permission was denied. Please allow microphone access in your browser address bar settings or try opening the app in a new tab.');
       } else {
-        alert(`Microphone access error: ${err.message || 'Could not access microphone.'}`);
+        setMediaErrorToast(`Microphone notice: ${err?.message || 'Could not access microphone.'}`);
       }
     }
   };
@@ -2715,6 +2889,47 @@ export default function App() {
               </div>
               <button
                 onClick={() => setToastNotification(null)}
+                className="text-white/40 hover:text-white p-1 rounded-lg hover:bg-white/10 transition-colors flex-shrink-0"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Media / Microphone Permission Notice Banner */}
+      <AnimatePresence>
+        {mediaErrorToast && (
+          <motion.div
+            initial={{ opacity: 0, y: -20, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -20, scale: 0.95 }}
+            transition={{ type: 'spring', damping: 25, stiffness: 350 }}
+            className="fixed top-3 sm:top-5 left-1/2 -translate-x-1/2 z-[140] w-[94%] max-w-md pointer-events-auto shadow-2xl"
+          >
+            <div className="bg-slate-900/95 backdrop-blur-2xl border border-amber-500/40 rounded-2xl p-3.5 shadow-2xl shadow-amber-950/50 flex items-start gap-3">
+              <div className="w-9 h-9 rounded-xl bg-amber-500/20 text-amber-300 flex items-center justify-center flex-shrink-0 border border-amber-500/30">
+                <MicOff className="w-4 h-4" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-bold text-white flex items-center gap-1.5">
+                  Microphone Access Notice
+                </p>
+                <p className="text-xs text-amber-200/90 mt-1 leading-relaxed break-words">
+                  {mediaErrorToast}
+                </p>
+                <div className="flex items-center gap-2 mt-2.5">
+                  <button
+                    onClick={() => setMediaErrorToast(null)}
+                    className="text-[11px] font-semibold text-white/90 bg-white/10 hover:bg-white/20 border border-white/20 px-3 py-1 rounded-lg transition-colors cursor-pointer active:scale-95"
+                  >
+                    Got it
+                  </button>
+                </div>
+              </div>
+              <button
+                onClick={() => setMediaErrorToast(null)}
                 className="text-white/40 hover:text-white p-1 rounded-lg hover:bg-white/10 transition-colors flex-shrink-0"
               >
                 <X className="w-3.5 h-3.5" />
@@ -3873,8 +4088,21 @@ export default function App() {
 
                 <h3 className="text-xl font-bold tracking-tight flex items-center gap-1.5">
                   {viewProfileUser.username}
-                  {activeGroupSettings.owner_username?.toLowerCase() === viewProfileUser.username?.toLowerCase() && <span title="Owner"><Crown className="w-4 h-4 text-yellow-400" /></span>}
-                  {activeGroupSettings.owner_username?.toLowerCase() !== viewProfileUser.username?.toLowerCase() && activeGroupSettings.admin_usernames?.some(a => a.toLowerCase() === viewProfileUser.username?.toLowerCase()) && <span title="Admin"><Shield className="w-4 h-4 text-cyan-400" /></span>}
+                  {activeGroupSettings.owner_username?.toLowerCase() === viewProfileUser.username?.toLowerCase() && (
+                    <span title="Company CEO" className="inline-flex items-center gap-1 text-xs font-bold text-amber-300 bg-amber-500/20 px-2 py-0.5 rounded-full border border-amber-500/40">
+                      <Crown className="w-3.5 h-3.5 text-amber-400" /> CEO
+                    </span>
+                  )}
+                  {activeGroupSettings.owner_username?.toLowerCase() !== viewProfileUser.username?.toLowerCase() && activeGroupSettings.admin_usernames?.some(a => a.toLowerCase() === viewProfileUser.username?.toLowerCase()) && (
+                    <span title="Manager" className="inline-flex items-center gap-1 text-xs font-bold text-cyan-300 bg-cyan-500/20 px-2 py-0.5 rounded-full border border-cyan-500/40">
+                      <Shield className="w-3.5 h-3.5 text-cyan-400" /> Manager
+                    </span>
+                  )}
+                  {activeGroupSettings.owner_username?.toLowerCase() !== viewProfileUser.username?.toLowerCase() && !activeGroupSettings.admin_usernames?.some(a => a.toLowerCase() === viewProfileUser.username?.toLowerCase()) && (
+                    <span title="Team Member" className="inline-flex items-center gap-1 text-xs font-medium text-slate-300 bg-slate-500/20 px-2 py-0.5 rounded-full border border-slate-500/30">
+                      <User className="w-3.5 h-3.5 text-slate-400" /> Member
+                    </span>
+                  )}
                 </h3>
 
                 {(() => {
@@ -3909,7 +4137,7 @@ export default function App() {
                   )}
                   <div className="flex items-center gap-2 text-white/60 pt-1 border-t border-white/5">
                     <User className="w-4 h-4 text-white/40 flex-shrink-0" />
-                    <span>Role: {viewProfileUser.username?.toLowerCase() === activeGroupSettings.owner_username?.toLowerCase() ? 'Group Owner' : activeGroupSettings.admin_usernames?.some(a => a.toLowerCase() === viewProfileUser.username?.toLowerCase()) ? 'Admin' : 'Member'}</span>
+                    <span>Role: {viewProfileUser.username?.toLowerCase() === activeGroupSettings.owner_username?.toLowerCase() ? 'CEO (Chief Executive)' : activeGroupSettings.admin_usernames?.some(a => a.toLowerCase() === viewProfileUser.username?.toLowerCase()) ? 'Manager' : 'Team Member'}</span>
                   </div>
                 </div>
 
@@ -3927,13 +4155,66 @@ export default function App() {
                         setActivePrivateUser(viewProfileUser.username);
                         setViewProfileUser(null);
                       }}
-                      className="w-full bg-gradient-to-r from-cyan-500 to-purple-600 hover:from-cyan-400 hover:to-purple-500 text-white font-semibold py-2.5 rounded-xl text-xs transition-all flex items-center justify-center gap-1.5 shadow-lg shadow-cyan-500/20"
+                      className="w-full bg-gradient-to-r from-cyan-500 to-purple-600 hover:from-cyan-400 hover:to-purple-500 text-white font-semibold py-2.5 rounded-xl text-xs transition-all flex items-center justify-center gap-1.5 shadow-lg shadow-cyan-500/20 cursor-pointer"
                     >
                       <Lock className="w-3.5 h-3.5" /> Send Private Message
                     </button>
 
+                    {/* CEO & Manager Action: Remove Member from Company */}
+                    {(() => {
+                      const targetLower = viewProfileUser.username.toLowerCase();
+                      const isTargetCEO = targetLower === ownerLower;
+                      const isTargetManager = (activeGroupSettings.admin_usernames || []).some(a => a.toLowerCase() === targetLower);
+                      const canRemove = (isOwner && !isTargetCEO) || (isAdmin && !isOwner && !isTargetCEO && !isTargetManager);
+
+                      if (canRemove) {
+                        return (
+                          <button
+                            type="button"
+                            onClick={() => removeMember(viewProfileUser.username)}
+                            className="w-full bg-red-600/90 hover:bg-red-600 text-white font-semibold py-2 rounded-xl text-xs transition-colors flex items-center justify-center gap-1.5 border border-red-500 cursor-pointer shadow-md shadow-red-600/20"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>Remove from Company ({isTargetManager ? 'Manager' : 'Team Member'})</span>
+                          </button>
+                        );
+                      }
+                      return null;
+                    })()}
+
+                    {/* CEO Exclusive Role Management */}
+                    {isOwner && viewProfileUser.username.toLowerCase() !== ownerLower && (
+                      <div className="flex gap-2 pt-1">
+                        {!activeGroupSettings.admin_usernames?.some(a => a.toLowerCase() === viewProfileUser.username.toLowerCase()) ? (
+                          <button
+                            type="button"
+                            onClick={() => makeAdmin(viewProfileUser.username)}
+                            className="flex-1 bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 font-semibold py-2 rounded-xl border border-cyan-500/40 text-xs transition-colors flex items-center justify-center gap-1 cursor-pointer"
+                          >
+                            <Shield className="w-3.5 h-3.5" /> Make Manager
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => dismissAdmin(viewProfileUser.username)}
+                            className="flex-1 bg-orange-500/20 hover:bg-orange-500/30 text-orange-300 font-semibold py-2 rounded-xl border border-orange-500/40 text-xs transition-colors flex items-center justify-center gap-1 cursor-pointer"
+                          >
+                            <ShieldAlert className="w-3.5 h-3.5" /> Dismiss Manager
+                          </button>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={() => transferOwnership(viewProfileUser.username)}
+                          className="flex-1 bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-300 font-semibold py-2 rounded-xl border border-yellow-500/40 text-xs transition-colors flex items-center justify-center gap-1 cursor-pointer"
+                        >
+                          <Crown className="w-3.5 h-3.5" /> Make CEO
+                        </button>
+                      </div>
+                    )}
+
                     {/* Block / Unblock Button (Not for owner) */}
-                    {viewProfileUser.username.toLowerCase() !== ownerLower && viewProfileUser.username.toLowerCase() !== 'mr saqib' && (
+                    {viewProfileUser.username.toLowerCase() !== ownerLower && (
                       <button
                         type="button"
                         onClick={() => {
@@ -3955,30 +4236,40 @@ export default function App() {
                       </button>
                     )}
 
-                    {/* Ban / Unban Button (For Owner / Admin, Not for owner target) */}
-                    {isAdmin && viewProfileUser.username.toLowerCase() !== ownerLower && viewProfileUser.username.toLowerCase() !== 'mr saqib' && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const isTargetBanned = (activeGroupSettings.banned_usernames || []).some(b => b.toLowerCase() === viewProfileUser.username.toLowerCase());
-                          if (isTargetBanned) {
-                            unbanUser(viewProfileUser.username);
-                          } else {
-                            banUser(viewProfileUser.username);
-                          }
-                          setViewProfileUser(null);
-                        }}
-                        className={cn(
-                          "w-full font-semibold py-2 rounded-xl text-xs transition-colors flex items-center justify-center gap-1.5 border cursor-pointer",
-                          (activeGroupSettings.banned_usernames || []).some(b => b.toLowerCase() === viewProfileUser.username.toLowerCase())
-                            ? "bg-green-500/20 text-green-300 border-green-500/40 hover:bg-green-500/30"
-                            : "bg-red-600 text-white border-red-500 hover:bg-red-500 shadow-md shadow-red-600/30"
-                        )}
-                      >
-                        <Ban className="w-3.5 h-3.5" />
-                        {(activeGroupSettings.banned_usernames || []).some(b => b.toLowerCase() === viewProfileUser.username.toLowerCase()) ? "Unban Account" : "Ban Account"}
-                      </button>
-                    )}
+                    {/* Ban / Unban Button (For CEO / Manager, but Manager cannot ban CEO or Manager) */}
+                    {(() => {
+                      const targetLower = viewProfileUser.username.toLowerCase();
+                      const isTargetCEO = targetLower === ownerLower;
+                      const isTargetManager = (activeGroupSettings.admin_usernames || []).some(a => a.toLowerCase() === targetLower);
+                      const canBan = (isOwner && !isTargetCEO) || (isAdmin && !isOwner && !isTargetCEO && !isTargetManager);
+
+                      if (canBan) {
+                        const isTargetBanned = (activeGroupSettings.banned_usernames || []).some(b => b.toLowerCase() === targetLower);
+                        return (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (isTargetBanned) {
+                                unbanUser(viewProfileUser.username);
+                              } else {
+                                banUser(viewProfileUser.username);
+                              }
+                              setViewProfileUser(null);
+                            }}
+                            className={cn(
+                              "w-full font-semibold py-2 rounded-xl text-xs transition-colors flex items-center justify-center gap-1.5 border cursor-pointer",
+                              isTargetBanned
+                                ? "bg-green-500/20 text-green-300 border-green-500/40 hover:bg-green-500/30"
+                                : "bg-red-700/80 text-white border-red-600 hover:bg-red-600 shadow-md shadow-red-700/30"
+                            )}
+                          >
+                            <Ban className="w-3.5 h-3.5" />
+                            {isTargetBanned ? "Unban Account" : "Ban Account"}
+                          </button>
+                        );
+                      }
+                      return null;
+                    })()}
                   </div>
                 )}
               </div>
@@ -4411,12 +4702,17 @@ export default function App() {
                                   </span>
                                   {isMemberOwner && (
                                     <span className="inline-flex items-center gap-1 bg-yellow-500/20 text-yellow-300 text-[9px] font-bold px-1.5 py-0.5 rounded-md border border-yellow-500/30">
-                                      <Crown className="w-2.5 h-2.5" /> Owner
+                                      <Crown className="w-2.5 h-2.5" /> CEO
                                     </span>
                                   )}
                                   {!isMemberOwner && isMemberAdmin && (
                                     <span className="inline-flex items-center gap-1 bg-cyan-500/20 text-cyan-300 text-[9px] font-bold px-1.5 py-0.5 rounded-md border border-cyan-500/30">
-                                      <Shield className="w-2.5 h-2.5" /> Admin
+                                      <Shield className="w-2.5 h-2.5" /> Manager
+                                    </span>
+                                  )}
+                                  {!isMemberOwner && !isMemberAdmin && (
+                                    <span className="inline-flex items-center gap-1 bg-slate-500/20 text-slate-300 text-[9px] font-medium px-1.5 py-0.5 rounded-md border border-slate-500/30">
+                                      <User className="w-2.5 h-2.5 text-slate-400" /> Member
                                     </span>
                                   )}
                                   {isMemberLeader && (
@@ -4450,8 +4746,29 @@ export default function App() {
                               </button>
                             )}
 
+                            {/* Remove Member Action (CEO can remove Manager/Member, Manager can remove Member) */}
+                            {(() => {
+                              if (member.username.toLowerCase() === username.toLowerCase()) return null;
+                              const isTargetCEO = isMemberOwner;
+                              const isTargetManager = isMemberAdmin;
+                              const canRemove = (isOwner && !isTargetCEO) || (isAdmin && !isOwner && !isTargetCEO && !isTargetManager);
+                              if (!canRemove) return null;
+
+                              return (
+                                <button
+                                  type="button"
+                                  onClick={() => removeMember(member.username)}
+                                  className="px-2.5 py-1 rounded-lg bg-red-600/30 hover:bg-red-600/50 text-red-200 text-[10px] font-semibold border border-red-500/50 transition-colors flex items-center gap-1 cursor-pointer"
+                                  title={`Remove ${isTargetManager ? 'Manager' : 'Team Member'} @${member.username} from company`}
+                                >
+                                  <Trash2 className="w-3 h-3 text-red-400" />
+                                  <span>Remove</span>
+                                </button>
+                              );
+                            })()}
+
                             {/* Block / Unblock action */}
-                            {member.username.toLowerCase() !== username.toLowerCase() && member.username.toLowerCase() !== ownerLower && member.username.toLowerCase() !== 'mr saqib' && (
+                            {member.username.toLowerCase() !== username.toLowerCase() && member.username.toLowerCase() !== ownerLower && (
                               <button
                                 type="button"
                                 onClick={() => {
@@ -4474,32 +4791,40 @@ export default function App() {
                               </button>
                             )}
 
-                            {/* Owner & Admin Ban Action */}
-                            {isAdmin && member.username.toLowerCase() !== username.toLowerCase() && !isMemberOwner && (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  const isTargetBanned = (activeGroupSettings.banned_usernames || []).some(b => b.toLowerCase() === member.username.toLowerCase());
-                                  if (isTargetBanned) {
-                                    unbanUser(member.username);
-                                  } else {
-                                    banUser(member.username);
-                                  }
-                                }}
-                                className={cn(
-                                  "px-2.5 py-1 rounded-lg text-[10px] font-semibold border transition-colors flex items-center gap-1 cursor-pointer",
-                                  (activeGroupSettings.banned_usernames || []).some(b => b.toLowerCase() === member.username.toLowerCase())
-                                    ? "bg-green-500/20 text-green-300 border-green-500/40 hover:bg-green-500/30"
-                                    : "bg-red-500/20 text-red-300 border-red-500/40 hover:bg-red-500/30"
-                                )}
-                                title={(activeGroupSettings.banned_usernames || []).some(b => b.toLowerCase() === member.username.toLowerCase()) ? "Unban User" : "Ban User"}
-                              >
-                                <Ban className="w-3 h-3" />
-                                <span>{(activeGroupSettings.banned_usernames || []).some(b => b.toLowerCase() === member.username.toLowerCase()) ? "Unban" : "Ban"}</span>
-                              </button>
-                            )}
+                            {/* Ban / Unban Action (CEO can ban anyone except self, Manager can only ban regular members) */}
+                            {(() => {
+                              if (member.username.toLowerCase() === username.toLowerCase()) return null;
+                              const isTargetCEO = isMemberOwner;
+                              const isTargetManager = isMemberAdmin;
+                              const canBan = (isOwner && !isTargetCEO) || (isAdmin && !isOwner && !isTargetCEO && !isTargetManager);
+                              if (!canBan) return null;
 
-                            {/* Owner admin actions */}
+                              const isTargetBanned = (activeGroupSettings.banned_usernames || []).some(b => b.toLowerCase() === member.username.toLowerCase());
+                              return (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (isTargetBanned) {
+                                      unbanUser(member.username);
+                                    } else {
+                                      banUser(member.username);
+                                    }
+                                  }}
+                                  className={cn(
+                                    "px-2.5 py-1 rounded-lg text-[10px] font-semibold border transition-colors flex items-center gap-1 cursor-pointer",
+                                    isTargetBanned
+                                      ? "bg-green-500/20 text-green-300 border-green-500/40 hover:bg-green-500/30"
+                                      : "bg-red-500/20 text-red-300 border-red-500/40 hover:bg-red-500/30"
+                                  )}
+                                  title={isTargetBanned ? "Unban User" : "Ban User"}
+                                >
+                                  <Ban className="w-3 h-3" />
+                                  <span>{isTargetBanned ? "Unban" : "Ban"}</span>
+                                </button>
+                              );
+                            })()}
+
+                            {/* CEO exclusive admin actions */}
                             {isOwner && member.username.toLowerCase() !== username.toLowerCase() && (
                               <>
                                 {!isMemberAdmin ? (
@@ -4507,19 +4832,19 @@ export default function App() {
                                     type="button"
                                     onClick={() => makeAdmin(member.username)}
                                     className="px-2.5 py-1 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 text-[10px] font-semibold border border-cyan-500/40 transition-colors cursor-pointer"
-                                    title="Promote to Admin"
+                                    title="Promote to Manager"
                                   >
-                                    Make Admin
+                                    Make Manager
                                   </button>
                                 ) : (
                                   !isMemberOwner && (
                                     <button
                                       type="button"
                                       onClick={() => dismissAdmin(member.username)}
-                                      className="px-2.5 py-1 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-red-300 text-[10px] font-semibold border border-red-500/40 transition-colors cursor-pointer"
-                                      title="Dismiss Admin"
+                                      className="px-2.5 py-1 rounded-lg bg-orange-500/20 hover:bg-orange-500/30 text-orange-300 text-[10px] font-semibold border border-orange-500/40 transition-colors cursor-pointer"
+                                      title="Dismiss Manager"
                                     >
-                                      Dismiss
+                                      Dismiss Manager
                                     </button>
                                   )
                                 )}
@@ -4527,10 +4852,11 @@ export default function App() {
                                   <button
                                     type="button"
                                     onClick={() => transferOwnership(member.username)}
-                                    className="px-2.5 py-1 rounded-lg bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-300 text-[10px] font-semibold border border-yellow-500/40 transition-colors cursor-pointer"
-                                    title="Transfer Group Ownership"
+                                    className="px-2.5 py-1 rounded-lg bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-300 text-[10px] font-semibold border border-yellow-500/40 transition-colors cursor-pointer flex items-center gap-1"
+                                    title="Appoint as Company CEO"
                                   >
-                                    Transfer
+                                    <Crown className="w-3 h-3 text-yellow-400" />
+                                    <span>Make CEO</span>
                                   </button>
                                 )}
                               </>
