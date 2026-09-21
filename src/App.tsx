@@ -5,7 +5,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { supabase, getSocket } from './supabase';
 import { Message, GroupSettings, UserProfile, OnlineUser, BanAppeal, MessageType, UserDailyStats, CompanyRole, ROLE_HIERARCHY } from './types';
-import { Send, Image as ImageIcon, User, Bell, BellOff, BellRing, Volume2, VolumeX, Edit2, Trash2, Check, CheckCheck, X, Info, Copy, ExternalLink, Reply, Settings, Camera, Loader2, Shield, ShieldAlert, ShieldCheck, GraduationCap, Crown, Users, Lock, Mail, Phone, FileText, LogOut, Eye, EyeOff, Clock, Circle, Ban, UserX, UserCheck, UserMinus, AlertTriangle, Mic, MicOff, Play, Pause, Download, Video as VideoIcon, Music, Paperclip, Plus, FileArchive, Star, Sparkles, ShoppingBag, Gift, Activity, BarChart2, Search, Forward, SmilePlus, PhoneCall, PhoneOff, Briefcase, MoreVertical, ArrowLeft } from 'lucide-react';
+import { Send, Image as ImageIcon, User, Bell, BellOff, BellRing, Volume2, VolumeX, Edit2, Trash2, Check, CheckCheck, X, Info, Copy, ExternalLink, Reply, Settings, Camera, Loader2, Shield, ShieldAlert, ShieldCheck, GraduationCap, Crown, Users, Lock, Mail, Phone, FileText, LogOut, Eye, EyeOff, Clock, Circle, Ban, UserX, UserCheck, UserMinus, AlertTriangle, Mic, MicOff, Play, Pause, Download, Video as VideoIcon, Music, Paperclip, Plus, FileArchive, Star, Sparkles, ShoppingBag, Gift, Activity, BarChart2, Search, Forward, SmilePlus, PhoneCall, PhoneOff, Briefcase, MoreVertical, ArrowLeft, Building2, CheckCircle2, ArrowRight, Radio, RefreshCw } from 'lucide-react';
 import { uploadToCloudinary, getCloudinaryDownloadUrl } from './lib/cloudinary';
 import { LeadManagement } from './components/LeadManagement';
 import { OwnerDashboard } from './components/dashboard/OwnerDashboard';
@@ -59,9 +59,27 @@ export default function App() {
   const [regPhone, setRegPhone] = useState('');
   const [regBio, setRegBio] = useState('');
   const [regPassword, setRegPassword] = useState('');
+  const [regAvatar, setRegAvatar] = useState('https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80');
+  const [customAvatarInput, setCustomAvatarInput] = useState('');
+  const [showCustomAvatarField, setShowCustomAvatarField] = useState(false);
+  const [availableAccounts, setAvailableAccounts] = useState<Array<{ username: string; role: CompanyRole; avatar_url: string; bio: string }>>([]);
   const [showAuthPassword, setShowAuthPassword] = useState(false);
   const [authError, setAuthError] = useState('');
   const [isAuthenticating, setIsAuthenticating] = useState(false);
+
+  // Load registered corporate accounts for quick login/demo switching
+  useEffect(() => {
+    if (!isJoined) {
+      fetch('/api/accounts/list')
+        .then(res => res.json())
+        .then(data => {
+          if (data && Array.isArray(data.profiles)) {
+            setAvailableAccounts(data.profiles);
+          }
+        })
+        .catch(() => {});
+    }
+  }, [isJoined]);
 
   const [onlineUsersCount, setOnlineUsersCount] = useState(0);
   const [notificationsEnabled, setNotificationsEnabled] = useState(() => {
@@ -212,7 +230,7 @@ export default function App() {
 
   // Dynamically assign ONLY the very first registered user as CEO.
   // All other users (2nd, 3rd, 4th, etc.) are strictly regular Employees.
-  const claimCeoIfUnassigned = async (candidateUsername: string): Promise<boolean> => {
+  const claimCeoIfUnassigned = async (candidateUsername: string, explicitAvatar?: string, explicitBio?: string, explicitPhone?: string): Promise<boolean> => {
     const cleanCand = candidateUsername.trim();
     if (!cleanCand) return false;
 
@@ -222,9 +240,9 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           username: cleanCand,
-          avatar: userAvatar || localStorage.getItem('chat_avatar') || '',
-          bio: userBio || localStorage.getItem('chat_bio') || '',
-          phone: userPhone || localStorage.getItem('chat_phone') || ''
+          avatar: explicitAvatar || userAvatar || localStorage.getItem('chat_avatar') || '',
+          bio: explicitBio || userBio || localStorage.getItem('chat_bio') || '',
+          phone: explicitPhone || userPhone || localStorage.getItem('chat_phone') || ''
         })
       });
       if (resp.ok) {
@@ -862,6 +880,11 @@ export default function App() {
     if (!isJoined || !username) return;
 
     const s = getSocket();
+
+    // Immediately notify server that we are online
+    const currentAv = userAvatar || localStorage.getItem('chat_avatar') || '';
+    s.emit('join', { username, avatar: currentAv });
+
     const handleKicked = (payload: { username: string; actor: string; role: string }) => {
       if (payload?.username && payload.username.toLowerCase() === username.toLowerCase()) {
         alert(`You have been removed from the company chat by @${payload.actor}. Access has been revoked.`);
@@ -890,67 +913,128 @@ export default function App() {
       }
     };
 
+    const handlePresenceState = (list: any[]) => {
+      if (Array.isArray(list) && isMounted) {
+        const formatted: OnlineUser[] = list.map((u: any) => ({
+          username: u.username,
+          avatar: u.avatar || '',
+          onlineAt: u.last_seen || new Date().toISOString(),
+        }));
+        setOnlineUsersList(formatted);
+        setOnlineUsersCount(formatted.length);
+      }
+    };
+
+    const handleLiveMessage = (payload: { eventType: string; message: Message }) => {
+      if (!payload?.message || !isMounted) return;
+      const m = payload.message;
+      const myUser = username.toLowerCase();
+      const isPrivate = Boolean(
+        m.recipient_username &&
+        m.recipient_username !== 'null' &&
+        m.recipient_username !== 'undefined' &&
+        m.recipient_username.trim() !== ''
+      );
+      if (isPrivate) {
+        const sender = (m.username || '').toLowerCase();
+        const recipient = (m.recipient_username || '').toLowerCase();
+        if (sender !== myUser && recipient !== myUser) return;
+      }
+      setMessages((prev) => {
+        const idx = prev.findIndex((existing) => existing.id === m.id);
+        if (idx >= 0) {
+          const next = [...prev];
+          next[idx] = { ...next[idx], ...m };
+          return next;
+        }
+        const next = [...prev, m];
+        return next.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+      });
+      if ((m.username || '').toLowerCase() !== myUser) {
+        triggerIncomingNotification(m);
+      }
+    };
+
     s.on('user_kicked', handleKicked);
     s.on('role_changed', handleRoleChanged);
     s.on('user_banned_status', handleBannedStatus);
+    s.on('presence_state', handlePresenceState);
+    s.on('chat_message_sync', handleLiveMessage);
 
     let isMounted = true;
     const pollSync = async () => {
       try {
+        // 1. Sync messages
         const res = await fetch('/api/chat/sync');
-        if (!res.ok) return;
-        const { data } = await res.json();
-        if (data && Array.isArray(data) && isMounted) {
-          const myUser = username.toLowerCase();
-          setMessages(prev => {
-            const relevantIncoming: Message[] = data.filter((m: Message) => {
-              const isPrivate = Boolean(
-                m.recipient_username &&
-                m.recipient_username !== 'null' &&
-                m.recipient_username !== 'undefined' &&
-                m.recipient_username.trim() !== ''
-              );
-              if (!isPrivate) return true;
-              const sender = (m.username || '').toLowerCase();
-              const recipient = (m.recipient_username || '').toLowerCase();
-              return sender === myUser || recipient === myUser;
-            });
+        if (res.ok) {
+          const { data } = await res.json();
+          if (data && Array.isArray(data) && isMounted) {
+            const myUser = username.toLowerCase();
+            setMessages(prev => {
+              const relevantIncoming: Message[] = data.filter((m: Message) => {
+                const isPrivate = Boolean(
+                  m.recipient_username &&
+                  m.recipient_username !== 'null' &&
+                  m.recipient_username !== 'undefined' &&
+                  m.recipient_username.trim() !== ''
+                );
+                if (!isPrivate) return true;
+                const sender = (m.username || '').toLowerCase();
+                const recipient = (m.recipient_username || '').toLowerCase();
+                return sender === myUser || recipient === myUser;
+              });
 
-            const prevMap = new Map(prev.map(m => [m.id, m]));
-            let changed = false;
-            for (const inc of relevantIncoming) {
-              const existing = prevMap.get(inc.id);
-              if (!existing) {
-                prevMap.set(inc.id, inc);
-                changed = true;
-              } else if (
-                existing.content !== inc.content ||
-                existing.is_edited !== inc.is_edited ||
-                JSON.stringify(existing.reactions) !== JSON.stringify(inc.reactions) ||
-                JSON.stringify(existing.read_by) !== JSON.stringify(inc.read_by)
-              ) {
-                prevMap.set(inc.id, { ...existing, ...inc });
-                changed = true;
+              const prevMap = new Map(prev.map(m => [m.id, m]));
+              let changed = false;
+              for (const inc of relevantIncoming) {
+                const existing = prevMap.get(inc.id);
+                if (!existing) {
+                  prevMap.set(inc.id, inc);
+                  changed = true;
+                } else if (
+                  existing.content !== inc.content ||
+                  existing.is_edited !== inc.is_edited ||
+                  JSON.stringify(existing.reactions) !== JSON.stringify(inc.reactions) ||
+                  JSON.stringify(existing.read_by) !== JSON.stringify(inc.read_by)
+                ) {
+                  prevMap.set(inc.id, { ...existing, ...inc });
+                  changed = true;
+                }
               }
-            }
 
-            const incomingIds = new Set(relevantIncoming.map(m => m.id));
-            const now = Date.now();
-            const filtered = Array.from(prevMap.values()).filter(m => {
-              if (incomingIds.has(m.id)) return true;
-              if (m.id.startsWith('temp-') || (m.id.startsWith('msg-') && (now - new Date(m.created_at).getTime() < 10000))) {
-                return true;
+              const incomingIds = new Set(relevantIncoming.map(m => m.id));
+              const now = Date.now();
+              const filtered = Array.from(prevMap.values()).filter(m => {
+                if (incomingIds.has(m.id)) return true;
+                if (m.id.startsWith('temp-') || (m.id.startsWith('msg-') && (now - new Date(m.created_at).getTime() < 10000))) {
+                  return true;
+                }
+                changed = true;
+                return false;
+              });
+
+              if (!changed && filtered.length === prev.length) {
+                return prev;
               }
-              changed = true;
-              return false;
+
+              return filtered.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
             });
+          }
+        }
 
-            if (!changed && filtered.length === prev.length) {
-              return prev;
-            }
-
-            return filtered.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
-          });
+        // 2. Sync presence fallback
+        const pRes = await fetch('/api/presence');
+        if (pRes.ok) {
+          const pData = await pRes.json();
+          if (pData?.data && Array.isArray(pData.data) && isMounted) {
+            const formatted: OnlineUser[] = pData.data.map((u: any) => ({
+              username: u.username,
+              avatar: u.avatar || '',
+              onlineAt: u.last_seen || new Date().toISOString(),
+            }));
+            setOnlineUsersList(formatted);
+            setOnlineUsersCount(formatted.length);
+          }
         }
       } catch {}
     };
@@ -963,6 +1047,8 @@ export default function App() {
       s.off('user_kicked', handleKicked);
       s.off('role_changed', handleRoleChanged);
       s.off('user_banned_status', handleBannedStatus);
+      s.off('presence_state', handlePresenceState);
+      s.off('chat_message_sync', handleLiveMessage);
     };
   }, [isJoined, username]);
 
@@ -1604,13 +1690,14 @@ export default function App() {
         }
       }
 
+      const chosenAvatar = regAvatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80';
       const newProf: UserProfile = {
         username: uClean,
         email: emailTrim,
         phone: regPhone.trim(),
         bio: regBio.trim(),
         password: regPassword,
-        avatar_url: ''
+        avatar_url: chosenAvatar
       };
 
       setUsername(uClean);
@@ -1618,19 +1705,21 @@ export default function App() {
       setUserPhone(newProf.phone || '');
       setUserBio(newProf.bio || '');
       setUserPassword(newProf.password || '');
+      setUserAvatar(chosenAvatar);
 
       localStorage.setItem('chat_username', uClean);
       if (newProf.email) localStorage.setItem('chat_email', newProf.email);
       if (newProf.phone) localStorage.setItem('chat_phone', newProf.phone);
       if (newProf.bio) localStorage.setItem('chat_bio', newProf.bio);
       if (newProf.password) localStorage.setItem('chat_password', newProf.password);
+      localStorage.setItem('chat_avatar', chosenAvatar);
 
       // Save to Supabase user_profiles
       await supabase.from('user_profiles').upsert(newProf).then();
 
       setIsJoined(true);
       requestNotificationPermission();
-      await claimCeoIfUnassigned(uClean);
+      await claimCeoIfUnassigned(uClean, chosenAvatar, newProf.bio, newProf.phone);
     } catch (err) {
       console.error('Registration failed:', err);
       setAuthError('An error occurred during registration. Please try again.');
@@ -3006,187 +3095,511 @@ export default function App() {
   }, [messages, activePrivateUser, username, blockedUsers, searchQuery]);
 
   if (!isJoined) {
+    const ceoUsername = activeGroupSettings.owner_username || localStorage.getItem('chat_company_ceo') || '';
+    const hasCeo = Boolean(ceoUsername && ceoUsername.trim() !== '');
+
+    const avatarPresets = [
+      { id: 'av1', url: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80', label: 'Executive' },
+      { id: 'av2', url: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=150&auto=format&fit=crop&q=80', label: 'Tech Lead' },
+      { id: 'av3', url: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=150&auto=format&fit=crop&q=80', label: 'Director' },
+      { id: 'av4', url: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=150&auto=format&fit=crop&q=80', label: 'Architect' },
+      { id: 'av5', url: 'https://images.unsplash.com/photo-1438761681033-6461ffad8d80?w=150&auto=format&fit=crop&q=80', label: 'Product' },
+      { id: 'av6', url: 'https://images.unsplash.com/photo-1522075469751-3a6694fb2f61?w=150&auto=format&fit=crop&q=80', label: 'Analyst' }
+    ];
+
     return (
-      <div className="min-h-screen bg-[#0f172a] relative flex items-center justify-center p-4 font-sans text-white overflow-hidden w-full">
-        <div className="absolute inset-0 z-0 pointer-events-none">
-          <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-purple-600/30 rounded-full blur-[120px]"></div>
-          <div className="absolute bottom-[10%] right-[-5%] w-[45%] h-[45%] bg-cyan-600/20 rounded-full blur-[100px]"></div>
-          <div className="absolute top-[30%] right-[20%] w-[30%] h-[30%] bg-pink-600/10 rounded-full blur-[150px]"></div>
+      <div className="min-h-screen bg-[#070b14] text-slate-100 flex flex-col justify-center items-center px-4 py-8 lg:py-12 relative overflow-x-hidden w-full font-sans">
+        {/* Ambient background glow layers */}
+        <div className="absolute inset-0 z-0 pointer-events-none overflow-hidden">
+          <div className="absolute -top-32 -left-32 w-96 h-96 bg-cyan-600/15 rounded-full blur-[140px]" />
+          <div className="absolute -bottom-32 -right-32 w-96 h-96 bg-purple-600/15 rounded-full blur-[140px]" />
+          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[700px] h-[700px] bg-indigo-900/10 rounded-full blur-[160px]" />
+          <div className="absolute inset-0 bg-[radial-gradient(#1e293b_1px,transparent_1px)] [background-size:24px_24px] opacity-25" />
         </div>
-        
-        <motion.div 
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="bg-white/5 backdrop-blur-2xl p-6 md:p-8 rounded-3xl shadow-2xl w-full max-w-md border border-white/10 relative z-10 my-8"
-        >
-          <div className="w-14 h-14 bg-gradient-to-tr from-cyan-500 to-purple-600 rounded-2xl flex items-center justify-center mx-auto mb-4 border border-white/20 shadow-lg shadow-cyan-500/20">
-            <User className="w-7 h-7 text-white" />
-          </div>
-          <h1 className="text-2xl font-bold text-center tracking-tight mb-1">Global Chat Room</h1>
-          <p className="text-white/60 text-center mb-6 text-xs">Sign in with email/username or create a new profile</p>
 
-          {/* Auth Tab Buttons */}
-          <div className="flex bg-white/5 p-1 rounded-xl mb-6 border border-white/10">
-            <button
-              type="button"
-              onClick={() => { setAuthMode('login'); setAuthError(''); }}
-              className={cn("flex-1 py-2 text-xs font-semibold rounded-lg transition-all", authMode === 'login' ? "bg-cyan-500 text-white shadow-md" : "text-white/60 hover:text-white")}
-            >
-              Sign In
-            </button>
-            <button
-              type="button"
-              onClick={() => { setAuthMode('register'); setAuthError(''); }}
-              className={cn("flex-1 py-2 text-xs font-semibold rounded-lg transition-all", authMode === 'register' ? "bg-cyan-500 text-white shadow-md" : "text-white/60 hover:text-white")}
-            >
-              Register
-            </button>
-          </div>
-
-          {authError && (
-            <div className="mb-4 p-3 rounded-xl bg-red-500/20 border border-red-500/40 text-red-300 text-xs flex items-center gap-2">
-              <ShieldAlert className="w-4 h-4 flex-shrink-0" />
-              <span>{authError}</span>
+        <div className="max-w-6xl w-full grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-12 items-center relative z-10">
+          {/* Left Column: Enterprise Branding & Hierarchy Guide */}
+          <motion.div 
+            initial={{ opacity: 0, x: -20 }}
+            animate={{ opacity: 1, x: 0 }}
+            transition={{ duration: 0.4 }}
+            className="lg:col-span-6 flex flex-col space-y-6"
+          >
+            {/* Enterprise Tag & Realtime Pulse */}
+            <div className="inline-flex items-center gap-2.5 px-3 py-1.5 rounded-full bg-slate-900/80 border border-slate-700/60 w-fit backdrop-blur-md shadow-sm">
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+              </span>
+              <span className="text-[11px] font-semibold tracking-wider text-slate-300 uppercase">
+                Enterprise Real-Time Network
+              </span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-800/60 font-mono">
+                {onlineUsersCount} Online
+              </span>
             </div>
-          )}
 
-          {authMode === 'login' ? (
-            <form onSubmit={handleLogin} className="space-y-4">
-              <div>
-                <label className="block text-xs font-medium text-white/80 mb-1 flex items-center gap-1.5">
-                  <User className="w-3.5 h-3.5 text-cyan-400" /> Username or Email
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={loginIdentifier}
-                  onChange={(e) => setLoginIdentifier(e.target.value)}
-                  className="w-full px-4 py-2.5 rounded-xl bg-white/10 border border-white/10 text-white text-sm placeholder:text-white/30 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-transparent transition-all backdrop-blur-md"
-                  placeholder="Enter email or username"
-                />
+            {/* Brand Title */}
+            <div>
+              <h1 className="text-3xl sm:text-4xl lg:text-5xl font-extrabold tracking-tight text-white leading-tight">
+                Corporate Team <br />
+                <span className="bg-gradient-to-r from-cyan-400 via-teal-300 to-indigo-400 bg-clip-text text-transparent">
+                  Command & Chat
+                </span>
+              </h1>
+              <p className="mt-3 text-sm sm:text-base text-slate-400 leading-relaxed max-w-xl">
+                Real-time synchrony across multiple devices. Instant messages, audio/video channels, rich attachments, and strict top-to-bottom corporate authority.
+              </p>
+            </div>
+
+            {/* Interactive Hierarchy Governance Breakdown */}
+            <div className="bg-slate-900/70 border border-slate-800/80 rounded-2xl p-4 sm:p-5 backdrop-blur-md shadow-lg space-y-3">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-2.5">
+                <span className="text-xs font-bold uppercase tracking-wider text-cyan-400 flex items-center gap-1.5">
+                  <ShieldCheck className="w-4 h-4" /> Corporate Hierarchy (درجہ بندی کا نظام)
+                </span>
+                <span className="text-[11px] text-slate-500">Tree Authority Model</span>
               </div>
 
-              <div>
-                <label className="block text-xs font-medium text-white/80 mb-1 flex items-center gap-1.5">
-                  <Lock className="w-3.5 h-3.5 text-cyan-400" /> Password
-                </label>
-                <div className="relative">
-                  <input
-                    type={showAuthPassword ? "text" : "password"}
-                    value={loginPassword}
-                    onChange={(e) => setLoginPassword(e.target.value)}
-                    className="w-full px-4 py-2.5 pr-10 rounded-xl bg-white/10 border border-white/10 text-white text-sm placeholder:text-white/30 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-transparent transition-all backdrop-blur-md"
-                    placeholder="Enter password"
-                  />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                {/* CEO */}
+                <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/25 flex items-start gap-2.5">
+                  <span className="text-xl">👑</span>
+                  <div>
+                    <div className="font-bold text-amber-300 flex items-center gap-1">
+                      CEO <span className="text-[10px] text-amber-400/70 font-normal">(چیف ایگزیکٹو)</span>
+                    </div>
+                    <p className="text-[11px] text-slate-300 leading-snug mt-0.5">
+                      First user to register automatically claims CEO. Holds apex power to promote, demote, and remove.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Manager */}
+                <div className="p-2.5 rounded-xl bg-cyan-500/10 border border-cyan-500/25 flex items-start gap-2.5">
+                  <span className="text-xl">🛡️</span>
+                  <div>
+                    <div className="font-bold text-cyan-300 flex items-center gap-1">
+                      Manager <span className="text-[10px] text-cyan-400/70 font-normal">(مینیجر)</span>
+                    </div>
+                    <p className="text-[11px] text-slate-300 leading-snug mt-0.5">
+                      Operational supervisor. Manages Team Leads, Employees, and Interns.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Team Lead */}
+                <div className="p-2.5 rounded-xl bg-purple-500/10 border border-purple-500/25 flex items-start gap-2.5">
+                  <span className="text-xl">🔰</span>
+                  <div>
+                    <div className="font-bold text-purple-300 flex items-center gap-1">
+                      Team Lead <span className="text-[10px] text-purple-400/70 font-normal">(ٹیم لیڈ)</span>
+                    </div>
+                    <p className="text-[11px] text-slate-300 leading-snug mt-0.5">
+                      Direct lead. Supervises Employees and Interns in daily execution.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Employee & Intern */}
+                <div className="p-2.5 rounded-xl bg-slate-800/80 border border-slate-700/60 flex items-start gap-2.5">
+                  <span className="text-xl">💼</span>
+                  <div>
+                    <div className="font-bold text-slate-200 flex items-center gap-1">
+                      Employee & Intern <span className="text-[10px] text-slate-400 font-normal">(ملازم / انٹرن)</span>
+                    </div>
+                    <p className="text-[11px] text-slate-400 leading-snug mt-0.5">
+                      Full collaboration, real-time messaging, voice notes, media sharing, and DMs.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Quick Live Status Indicators */}
+            <div className="flex flex-wrap items-center gap-4 text-xs text-slate-400 pt-1">
+              <div className="flex items-center gap-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Instant Multi-Device Sync</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5 text-cyan-400" />
+                <span>WebRTC Voice/Video Calls</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5 text-indigo-400" />
+                <span>Socket.IO Live Presence</span>
+              </div>
+            </div>
+          </motion.div>
+
+          {/* Right Column: Authentication Card */}
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.4, delay: 0.1 }}
+            className="lg:col-span-6 w-full"
+          >
+            <div className="bg-slate-900/90 border border-slate-800/90 backdrop-blur-2xl p-6 sm:p-8 rounded-3xl shadow-2xl shadow-cyan-950/20 relative">
+              {/* Card Header & Tab Switcher */}
+              <div className="flex items-center justify-between mb-6">
+                <div>
+                  <h2 className="text-xl font-bold text-white tracking-tight">
+                    {authMode === 'login' ? 'Welcome Back' : 'Create Your Profile'}
+                  </h2>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    {authMode === 'login' ? 'Sign in to access corporate channels' : 'Join your organization workspace'}
+                  </p>
+                </div>
+
+                {/* Tab Pill */}
+                <div className="flex bg-slate-950/80 p-1 rounded-xl border border-slate-800 shadow-inner">
                   <button
                     type="button"
-                    onClick={() => setShowAuthPassword(!showAuthPassword)}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-white/40 hover:text-white text-xs"
+                    onClick={() => { setAuthMode('login'); setAuthError(''); }}
+                    className={cn(
+                      "px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer",
+                      authMode === 'login' 
+                        ? "bg-cyan-500 text-slate-950 shadow-md font-bold" 
+                        : "text-slate-400 hover:text-white"
+                    )}
                   >
-                    {showAuthPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    Sign In
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setAuthMode('register'); setAuthError(''); }}
+                    className={cn(
+                      "px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer",
+                      authMode === 'register' 
+                        ? "bg-cyan-500 text-slate-950 shadow-md font-bold" 
+                        : "text-slate-400 hover:text-white"
+                    )}
+                  >
+                    Register
                   </button>
                 </div>
               </div>
 
-              <button
-                type="submit"
-                disabled={isAuthenticating || !loginIdentifier.trim()}
-                className="w-full bg-cyan-500 text-white font-semibold py-3 px-4 rounded-xl hover:bg-cyan-400 transition-colors shadow-lg shadow-cyan-500/20 focus:outline-none focus:ring-2 focus:ring-cyan-500 disabled:opacity-50 flex items-center justify-center gap-2 mt-2"
-              >
-                {isAuthenticating && <Loader2 className="w-4 h-4 animate-spin" />}
-                Enter Chat
-              </button>
-            </form>
-          ) : (
-            <form onSubmit={handleRegister} className="space-y-3">
-              <div>
-                <label className="block text-xs font-medium text-white/80 mb-1 flex items-center gap-1.5">
-                  <User className="w-3.5 h-3.5 text-cyan-400" /> Username <span className="text-cyan-400">*</span>
-                </label>
-                <input
-                  type="text"
-                  required
-                  maxLength={20}
-                  value={regUsername}
-                  onChange={(e) => setRegUsername(e.target.value)}
-                  className="w-full px-4 py-2 rounded-xl bg-white/10 border border-white/10 text-white text-sm placeholder:text-white/30 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-transparent transition-all backdrop-blur-md"
-                  placeholder="E.g. alex_dev"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-white/80 mb-1 flex items-center gap-1.5">
-                  <Mail className="w-3.5 h-3.5 text-cyan-400" /> Email Address
-                </label>
-                <input
-                  type="email"
-                  value={regEmail}
-                  onChange={(e) => setRegEmail(e.target.value)}
-                  className="w-full px-4 py-2 rounded-xl bg-white/10 border border-white/10 text-white text-sm placeholder:text-white/30 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-transparent transition-all backdrop-blur-md"
-                  placeholder="alex@example.com"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-white/80 mb-1 flex items-center gap-1.5">
-                  <Phone className="w-3.5 h-3.5 text-cyan-400" /> Phone Number
-                </label>
-                <input
-                  type="tel"
-                  value={regPhone}
-                  onChange={(e) => setRegPhone(e.target.value)}
-                  className="w-full px-4 py-2 rounded-xl bg-white/10 border border-white/10 text-white text-sm placeholder:text-white/30 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-transparent transition-all backdrop-blur-md"
-                  placeholder="+1 234 567 8900"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-white/80 mb-1 flex items-center gap-1.5">
-                  <FileText className="w-3.5 h-3.5 text-cyan-400" /> Profile Bio / Description
-                </label>
-                <input
-                  type="text"
-                  maxLength={60}
-                  value={regBio}
-                  onChange={(e) => setRegBio(e.target.value)}
-                  className="w-full px-4 py-2 rounded-xl bg-white/10 border border-white/10 text-white text-sm placeholder:text-white/30 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-transparent transition-all backdrop-blur-md"
-                  placeholder="Tell us about yourself..."
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-white/80 mb-1 flex items-center gap-1.5">
-                  <Lock className="w-3.5 h-3.5 text-cyan-400" /> Password
-                </label>
-                <div className="relative">
-                  <input
-                    type={showAuthPassword ? "text" : "password"}
-                    value={regPassword}
-                    onChange={(e) => setRegPassword(e.target.value)}
-                    className="w-full px-4 py-2 pr-10 rounded-xl bg-white/10 border border-white/10 text-white text-sm placeholder:text-white/30 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-transparent transition-all backdrop-blur-md"
-                    placeholder="Set password"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowAuthPassword(!showAuthPassword)}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-white/40 hover:text-white text-xs"
-                  >
-                    {showAuthPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                  </button>
+              {/* Error Notice */}
+              {authError && (
+                <div className="mb-4 p-3 rounded-xl bg-red-500/15 border border-red-500/40 text-red-200 text-xs flex items-center gap-2 animate-in fade-in">
+                  <ShieldAlert className="w-4 h-4 text-red-400 flex-shrink-0" />
+                  <span>{authError}</span>
                 </div>
-              </div>
+              )}
 
-              <button
-                type="submit"
-                disabled={isAuthenticating || !regUsername.trim()}
-                className="w-full bg-cyan-500 text-white font-semibold py-3 px-4 rounded-xl hover:bg-cyan-400 transition-colors shadow-lg shadow-cyan-500/20 focus:outline-none focus:ring-2 focus:ring-cyan-500 disabled:opacity-50 flex items-center justify-center gap-2 mt-2"
-              >
-                {isAuthenticating && <Loader2 className="w-4 h-4 animate-spin" />}
-                Create Account & Join
-              </button>
-            </form>
-          )}
-        </motion.div>
+              {/* Quick Switch for Existing Accounts (Great for Multi-Device testing) */}
+              {availableAccounts.length > 0 && authMode === 'login' && (
+                <div className="mb-5 p-3 rounded-2xl bg-slate-950/60 border border-slate-800/80">
+                  <div className="flex items-center justify-between text-[11px] text-slate-400 mb-2 font-medium">
+                    <span className="flex items-center gap-1 text-slate-300">
+                      <Users className="w-3.5 h-3.5 text-cyan-400" /> Quick Account Select:
+                    </span>
+                    <span className="text-[10px] text-slate-500">Tap to fill username</span>
+                  </div>
+                  <div className="flex items-center gap-2 overflow-x-auto pb-1.5 scrollbar-thin">
+                    {availableAccounts.map(acc => {
+                      const roleInfo = ROLE_DETAILS[acc.role] || ROLE_DETAILS.employee;
+                      return (
+                        <button
+                          key={acc.username}
+                          type="button"
+                          onClick={() => {
+                            setLoginIdentifier(acc.username);
+                            setAuthError('');
+                          }}
+                          className={cn(
+                            "flex items-center gap-2 px-2.5 py-1.5 rounded-xl border text-xs whitespace-nowrap transition-all cursor-pointer",
+                            loginIdentifier.toLowerCase() === acc.username.toLowerCase()
+                              ? "bg-cyan-500/20 border-cyan-400/60 text-cyan-200 shadow-sm"
+                              : "bg-slate-900/80 border-slate-700/60 text-slate-300 hover:bg-slate-800 hover:border-slate-600"
+                          )}
+                        >
+                          <img
+                            src={acc.avatar_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80'}
+                            alt={acc.username}
+                            className="w-5 h-5 rounded-full object-cover"
+                          />
+                          <span className="font-medium">@{acc.username}</span>
+                          <span className="text-[10px] opacity-75">{roleInfo.badgeIcon}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* SIGN IN FORM */}
+              {authMode === 'login' ? (
+                <form onSubmit={handleLogin} className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1.5 flex items-center justify-between">
+                      <span className="flex items-center gap-1.5">
+                        <User className="w-3.5 h-3.5 text-cyan-400" /> Username or Email
+                      </span>
+                    </label>
+                    <div className="relative">
+                      <input
+                        type="text"
+                        required
+                        value={loginIdentifier}
+                        onChange={(e) => setLoginIdentifier(e.target.value)}
+                        className="w-full px-4 py-2.5 rounded-xl bg-slate-950/80 border border-slate-700/80 text-white text-sm placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500 transition-all"
+                        placeholder="e.g. saqib or admin@company.com"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1.5 flex items-center justify-between">
+                      <span className="flex items-center gap-1.5">
+                        <Lock className="w-3.5 h-3.5 text-cyan-400" /> Password
+                      </span>
+                      <span className="text-[10px] text-slate-500">(Optional for demo logins)</span>
+                    </label>
+                    <div className="relative">
+                      <input
+                        type={showAuthPassword ? "text" : "password"}
+                        value={loginPassword}
+                        onChange={(e) => setLoginPassword(e.target.value)}
+                        className="w-full px-4 py-2.5 pr-10 rounded-xl bg-slate-950/80 border border-slate-700/80 text-white text-sm placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500 transition-all"
+                        placeholder="Enter your corporate password"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowAuthPassword(!showAuthPassword)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 transition-colors cursor-pointer"
+                      >
+                        {showAuthPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={isAuthenticating || !loginIdentifier.trim()}
+                    className="w-full mt-2 bg-gradient-to-r from-cyan-500 via-teal-500 to-indigo-600 hover:from-cyan-400 hover:to-indigo-500 text-slate-950 font-bold py-3 px-4 rounded-xl shadow-lg shadow-cyan-500/20 focus:outline-none focus:ring-2 focus:ring-cyan-400 disabled:opacity-50 transition-all flex items-center justify-center gap-2 cursor-pointer text-sm"
+                  >
+                    {isAuthenticating ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin text-slate-950" />
+                        <span>Verifying Credentials...</span>
+                      </>
+                    ) : (
+                      <>
+                        <span>Enter Workspace</span>
+                        <ArrowRight className="w-4 h-4 text-slate-950" />
+                      </>
+                    )}
+                  </button>
+
+                  <div className="text-center pt-2">
+                    <button
+                      type="button"
+                      onClick={() => { setAuthMode('register'); setAuthError(''); }}
+                      className="text-xs text-slate-400 hover:text-cyan-300 transition-colors"
+                    >
+                      New team member? <span className="text-cyan-400 font-semibold underline underline-offset-2">Create an account</span>
+                    </button>
+                  </div>
+                </form>
+              ) : (
+                /* REGISTRATION FORM */
+                <form onSubmit={handleRegister} className="space-y-3.5">
+                  {/* Next Role Preview Alert */}
+                  {!hasCeo ? (
+                    <div className="p-3 rounded-2xl bg-amber-500/15 border border-amber-500/40 text-amber-200 text-xs flex items-center gap-2.5">
+                      <span className="text-xl">👑</span>
+                      <div>
+                        <span className="font-bold text-amber-300">First User Privilege:</span>
+                        <p className="text-[11px] text-amber-200/90 mt-0.5">
+                          No CEO is registered yet. You will be automatically crowned as the <strong>Company CEO</strong> with full authority!
+                        </p>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="p-3 rounded-2xl bg-slate-950/60 border border-slate-800 text-slate-300 text-xs flex items-center gap-2.5">
+                      <span className="text-xl">💼</span>
+                      <div>
+                        <span className="font-semibold text-cyan-300">Corporate Onboarding:</span>
+                        <p className="text-[11px] text-slate-400 mt-0.5">
+                          You will join as an <strong>Employee</strong>. CEO (@{ceoUsername}) or a Manager can promote your corporate rank anytime.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Avatar Picker */}
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1.5 flex items-center justify-between">
+                      <span className="flex items-center gap-1.5">
+                        <Camera className="w-3.5 h-3.5 text-cyan-400" /> Select Profile Avatar
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setShowCustomAvatarField(!showCustomAvatarField)}
+                        className="text-[10px] text-cyan-400 hover:underline"
+                      >
+                        {showCustomAvatarField ? 'Use Presets' : 'Custom Image URL'}
+                      </button>
+                    </label>
+
+                    {!showCustomAvatarField ? (
+                      <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                        {avatarPresets.map(preset => {
+                          const isSelected = regAvatar === preset.url;
+                          return (
+                            <button
+                              key={preset.id}
+                              type="button"
+                              onClick={() => setRegAvatar(preset.url)}
+                              className={cn(
+                                "relative rounded-full p-0.5 border-2 transition-all flex-shrink-0 cursor-pointer",
+                                isSelected ? "border-cyan-400 scale-105 shadow-md shadow-cyan-500/30" : "border-slate-700 opacity-60 hover:opacity-100"
+                              )}
+                              title={preset.label}
+                            >
+                              <img src={preset.url} alt={preset.label} className="w-9 h-9 rounded-full object-cover" />
+                              {isSelected && (
+                                <span className="absolute bottom-0 right-0 w-3.5 h-3.5 bg-cyan-500 rounded-full flex items-center justify-center text-[9px] text-slate-950 font-bold">
+                                  ✓
+                                </span>
+                              )}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <input
+                        type="url"
+                        value={customAvatarInput}
+                        onChange={(e) => {
+                          setCustomAvatarInput(e.target.value);
+                          if (e.target.value.trim()) setRegAvatar(e.target.value.trim());
+                        }}
+                        className="w-full px-3 py-2 rounded-xl bg-slate-950/80 border border-slate-700 text-white text-xs placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+                        placeholder="https://example.com/avatar.jpg"
+                      />
+                    )}
+                  </div>
+
+                  {/* Username (Required) */}
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1 flex items-center gap-1.5">
+                      <User className="w-3.5 h-3.5 text-cyan-400" /> Username <span className="text-cyan-400">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      maxLength={20}
+                      value={regUsername}
+                      onChange={(e) => setRegUsername(e.target.value)}
+                      className="w-full px-3.5 py-2 rounded-xl bg-slate-950/80 border border-slate-700/80 text-white text-sm placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500 transition-all"
+                      placeholder="e.g. saqib_ali"
+                    />
+                  </div>
+
+                  {/* Email & Phone in 2 Columns */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1 flex items-center gap-1.5">
+                        <Mail className="w-3.5 h-3.5 text-cyan-400" /> Email
+                      </label>
+                      <input
+                        type="email"
+                        value={regEmail}
+                        onChange={(e) => setRegEmail(e.target.value)}
+                        className="w-full px-3 py-2 rounded-xl bg-slate-950/80 border border-slate-700/80 text-white text-xs placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+                        placeholder="name@company.com"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1 flex items-center gap-1.5">
+                        <Phone className="w-3.5 h-3.5 text-cyan-400" /> Phone
+                      </label>
+                      <input
+                        type="tel"
+                        value={regPhone}
+                        onChange={(e) => setRegPhone(e.target.value)}
+                        className="w-full px-3 py-2 rounded-xl bg-slate-950/80 border border-slate-700/80 text-white text-xs placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+                        placeholder="+92 300 1234567"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Job Title / Bio */}
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1 flex items-center gap-1.5">
+                      <Briefcase className="w-3.5 h-3.5 text-cyan-400" /> Job Role / Bio
+                    </label>
+                    <input
+                      type="text"
+                      maxLength={60}
+                      value={regBio}
+                      onChange={(e) => setRegBio(e.target.value)}
+                      className="w-full px-3.5 py-2 rounded-xl bg-slate-950/80 border border-slate-700/80 text-white text-xs placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+                      placeholder="e.g. Lead Systems Engineer"
+                    />
+                  </div>
+
+                  {/* Password */}
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1 flex items-center justify-between">
+                      <span className="flex items-center gap-1.5">
+                        <Lock className="w-3.5 h-3.5 text-cyan-400" /> Corporate Password
+                      </span>
+                    </label>
+                    <div className="relative">
+                      <input
+                        type={showAuthPassword ? "text" : "password"}
+                        value={regPassword}
+                        onChange={(e) => setRegPassword(e.target.value)}
+                        className="w-full px-3.5 py-2 pr-10 rounded-xl bg-slate-950/80 border border-slate-700/80 text-white text-sm placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+                        placeholder="Create a password"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowAuthPassword(!showAuthPassword)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 text-xs cursor-pointer"
+                      >
+                        {showAuthPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={isAuthenticating || !regUsername.trim()}
+                    className="w-full mt-2 bg-gradient-to-r from-cyan-500 via-teal-500 to-indigo-600 hover:from-cyan-400 hover:to-indigo-500 text-slate-950 font-bold py-3 px-4 rounded-xl shadow-lg shadow-cyan-500/20 focus:outline-none focus:ring-2 focus:ring-cyan-400 disabled:opacity-50 transition-all flex items-center justify-center gap-2 cursor-pointer text-sm"
+                  >
+                    {isAuthenticating ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin text-slate-950" />
+                        <span>Provisioning Account...</span>
+                      </>
+                    ) : (
+                      <>
+                        <span>Join Corporate Workspace</span>
+                        <ArrowRight className="w-4 h-4 text-slate-950" />
+                      </>
+                    )}
+                  </button>
+
+                  <div className="text-center pt-1">
+                    <button
+                      type="button"
+                      onClick={() => { setAuthMode('login'); setAuthError(''); }}
+                      className="text-xs text-slate-400 hover:text-cyan-300 transition-colors"
+                    >
+                      Already have an account? <span className="text-cyan-400 font-semibold underline underline-offset-2">Sign in</span>
+                    </button>
+                  </div>
+                </form>
+              )}
+            </div>
+          </motion.div>
+        </div>
       </div>
     );
   }
@@ -4617,9 +5030,13 @@ export default function App() {
                       <span>{viewProfileUser.phone}</span>
                     </div>
                   )}
-                  <div className="flex items-center gap-2 text-white/60 pt-1 border-t border-white/5">
-                    <User className="w-4 h-4 text-white/40 flex-shrink-0" />
-                    <span>Role: {viewProfileUser.username?.toLowerCase() === activeGroupSettings.owner_username?.toLowerCase() ? 'CEO (Chief Executive)' : activeGroupSettings.admin_usernames?.some(a => a.toLowerCase() === viewProfileUser.username?.toLowerCase()) ? 'Manager' : 'Team Member'}</span>
+                  <div className="flex items-center justify-between text-white/80 pt-2 border-t border-white/10">
+                    <span className="text-white/50 text-xs flex items-center gap-1.5">
+                      <User className="w-3.5 h-3.5 text-cyan-400" /> Corporate Rank
+                    </span>
+                    <div>
+                      {renderRoleBadge(viewProfileUser.username, 'sm')}
+                    </div>
                   </div>
                 </div>
 
@@ -4631,7 +5048,7 @@ export default function App() {
                     <Edit2 className="w-3.5 h-3.5" /> Edit Profile
                   </button>
                 ) : (
-                  <div className="mt-4 w-full space-y-2">
+                  <div className="mt-4 w-full space-y-2.5">
                     <button
                       onClick={() => {
                         setActivePrivateUser(viewProfileUser.username);
@@ -4642,58 +5059,95 @@ export default function App() {
                       <Lock className="w-3.5 h-3.5" /> Send Private Message
                     </button>
 
-                    {/* CEO & Manager Action: Remove Member from Company */}
+                    {/* Full Hierarchical Role Management (CEO & Managers) */}
                     {(() => {
                       const targetLower = viewProfileUser.username.toLowerCase();
-                      const isTargetCEO = targetLower === ownerLower;
-                      const isTargetManager = (activeGroupSettings.admin_usernames || []).some(a => a.toLowerCase() === targetLower);
-                      const canRemove = (isOwner && !isTargetCEO) || (isAdmin && !isOwner && !isTargetCEO && !isTargetManager);
+                      const targetRole = getUserRole(viewProfileUser.username, activeGroupSettings);
+                      const canManage = canManageUser(currentUserRole, targetRole);
+                      const assignableRoles = getAllowedAssignableRoles(currentUserRole);
+
+                      if (!canManage || assignableRoles.length === 0) return null;
+
+                      return (
+                        <div className="pt-2 border-t border-white/10 space-y-2">
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="font-semibold flex items-center gap-1.5 text-cyan-300">
+                              <ShieldCheck className="w-3.5 h-3.5" /> Change Role / پروموٹ
+                            </span>
+                            <span className="text-[10px] text-white/50">{ROLE_DETAILS[currentUserRole].title} Authority</span>
+                          </div>
+                          
+                          <div className="grid grid-cols-2 gap-1.5">
+                            {assignableRoles.map((role) => {
+                              const roleInfo = ROLE_DETAILS[role];
+                              const isCurrent = targetRole === role;
+                              return (
+                                <button
+                                  key={role}
+                                  type="button"
+                                  disabled={isCurrent}
+                                  onClick={async () => {
+                                    await changeUserRole(viewProfileUser.username, role);
+                                    setViewProfileUser(prev => prev ? { ...prev } : null);
+                                  }}
+                                  className={cn(
+                                    "px-2.5 py-1.5 rounded-xl text-xs font-medium border flex items-center gap-1.5 transition-all text-left",
+                                    isCurrent 
+                                      ? "opacity-40 cursor-not-allowed bg-white/5 border-white/10 text-white/50"
+                                      : "bg-white/10 hover:bg-white/20 border-white/15 text-white hover:border-cyan-400/50 cursor-pointer shadow-sm"
+                                  )}
+                                >
+                                  <span className="text-sm">{roleInfo.badgeIcon}</span>
+                                  <div className="flex flex-col min-w-0">
+                                    <span className="truncate text-[11px] font-semibold">{roleInfo.title}</span>
+                                    <span className="text-[9px] text-white/50">{roleInfo.urduTitle}</span>
+                                  </div>
+                                </button>
+                              );
+                            })}
+                          </div>
+
+                          {/* If CEO, also offer CEO Ownership Transfer */}
+                          {isOwner && targetLower !== ownerLower && (
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                await transferOwnership(viewProfileUser.username);
+                                setViewProfileUser(null);
+                              }}
+                              className="w-full mt-1 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 font-semibold py-1.5 px-3 rounded-xl border border-amber-500/40 text-xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                            >
+                              <Crown className="w-3.5 h-3.5 text-amber-400" /> Transfer CEO (چیف ایگزیکٹو)
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })()}
+
+                    {/* CEO & Manager Action: Remove Member from Company */}
+                    {(() => {
+                      const targetRole = getUserRole(viewProfileUser.username, activeGroupSettings);
+                      const canRemove = canManageUser(currentUserRole, targetRole);
 
                       if (canRemove) {
                         return (
                           <button
                             type="button"
-                            onClick={() => removeMember(viewProfileUser.username)}
-                            className="w-full bg-red-600/90 hover:bg-red-600 text-white font-semibold py-2 rounded-xl text-xs transition-colors flex items-center justify-center gap-1.5 border border-red-500 cursor-pointer shadow-md shadow-red-600/20"
+                            onClick={async () => {
+                              if (confirm(`Are you sure you want to remove @${viewProfileUser.username} from the company and chat?`)) {
+                                await removeMember(viewProfileUser.username);
+                                setViewProfileUser(null);
+                              }
+                            }}
+                            className="w-full bg-red-600/90 hover:bg-red-600 text-white font-semibold py-2 rounded-xl text-xs transition-colors flex items-center justify-center gap-1.5 border border-red-500 cursor-pointer shadow-md shadow-red-600/20 mt-1"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
-                            <span>Remove from Company ({isTargetManager ? 'Manager' : 'Team Member'})</span>
+                            <span>Remove from Company ({ROLE_DETAILS[targetRole].title})</span>
                           </button>
                         );
                       }
                       return null;
                     })()}
-
-                    {/* CEO Exclusive Role Management */}
-                    {isOwner && viewProfileUser.username.toLowerCase() !== ownerLower && (
-                      <div className="flex gap-2 pt-1">
-                        {!activeGroupSettings.admin_usernames?.some(a => a.toLowerCase() === viewProfileUser.username.toLowerCase()) ? (
-                          <button
-                            type="button"
-                            onClick={() => makeAdmin(viewProfileUser.username)}
-                            className="flex-1 bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 font-semibold py-2 rounded-xl border border-cyan-500/40 text-xs transition-colors flex items-center justify-center gap-1 cursor-pointer"
-                          >
-                            <Shield className="w-3.5 h-3.5" /> Make Manager
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => dismissAdmin(viewProfileUser.username)}
-                            className="flex-1 bg-orange-500/20 hover:bg-orange-500/30 text-orange-300 font-semibold py-2 rounded-xl border border-orange-500/40 text-xs transition-colors flex items-center justify-center gap-1 cursor-pointer"
-                          >
-                            <ShieldAlert className="w-3.5 h-3.5" /> Dismiss Manager
-                          </button>
-                        )}
-
-                        <button
-                          type="button"
-                          onClick={() => transferOwnership(viewProfileUser.username)}
-                          className="flex-1 bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-300 font-semibold py-2 rounded-xl border border-yellow-500/40 text-xs transition-colors flex items-center justify-center gap-1 cursor-pointer"
-                        >
-                          <Crown className="w-3.5 h-3.5" /> Make CEO
-                        </button>
-                      </div>
-                    )}
 
                     {/* Block / Unblock Button (Not for owner) */}
                     {viewProfileUser.username.toLowerCase() !== ownerLower && (

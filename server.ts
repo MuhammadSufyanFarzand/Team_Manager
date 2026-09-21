@@ -98,6 +98,14 @@ async function startServer() {
   const onlineUsers = new Map<string, { username: string; avatar: string; socketId: string; lastSeen: string }>();
 
   io.on("connection", (socket) => {
+    // Immediately send current active presence list to the newly connected client
+    const currentList = Array.from(onlineUsers.values()).map((u) => ({
+      username: u.username,
+      avatar: u.avatar,
+      last_seen: u.lastSeen,
+    }));
+    socket.emit("presence_state", currentList);
+
     socket.on("join", ({ username, avatar }: { username: string; avatar?: string }) => {
       if (!username) return;
       const cleanUser = username.trim();
@@ -108,7 +116,7 @@ async function startServer() {
         lastSeen: new Date().toISOString(),
       });
 
-      // Broadcast presence
+      // Broadcast presence to all clients
       const activeList = Array.from(onlineUsers.values()).map((u) => ({
         username: u.username,
         avatar: u.avatar,
@@ -163,11 +171,45 @@ async function startServer() {
       new: record,
       old: oldRecord || (eventType === "DELETE" ? record : undefined),
     });
+    if (table === "messages") {
+      io.emit("chat_message_sync", {
+        eventType,
+        message: record,
+        id: record?.id,
+      });
+    }
   }
 
   // API ROUTES
   app.get("/api/health", (_req, res) => {
     res.json({ status: "ok", timestamp: new Date().toISOString() });
+  });
+
+  // Online presence endpoint
+  app.get("/api/presence", (_req, res) => {
+    const activeList = Array.from(onlineUsers.values()).map((u) => ({
+      username: u.username,
+      avatar: u.avatar,
+      last_seen: u.lastSeen,
+    }));
+    res.json({ data: activeList, count: activeList.length });
+  });
+
+  // Registered accounts overview endpoint for fast testing and role preview
+  app.get("/api/accounts/list", (_req, res) => {
+    const profiles = (db.user_profiles || []).map((p) => ({
+      username: p.username,
+      avatar_url: p.avatar_url || "",
+      role: getUserRole(p.username, db.group_settings?.[0] || defaultDatabase.group_settings[0]),
+      bio: p.bio || "",
+      last_seen: p.last_seen || "",
+    }));
+    const gs = db.group_settings?.[0] || defaultDatabase.group_settings[0];
+    res.json({
+      profiles,
+      ceo: gs.owner_username || "",
+      totalCount: profiles.length,
+    });
   });
 
   // Server-authoritative CEO claim / role check

@@ -8,6 +8,7 @@ export const ROLE_DETAILS: Record<CompanyRole, {
   textClass: string;
   bgClass: string;
   level: number;
+  badgeIcon: string;
 }> = {
   ceo: {
     title: 'CEO',
@@ -16,7 +17,8 @@ export const ROLE_DETAILS: Record<CompanyRole, {
     borderClass: 'border-amber-500/40',
     textClass: 'text-amber-300',
     bgClass: 'bg-amber-500/20',
-    level: 1
+    level: 1,
+    badgeIcon: '👑'
   },
   manager: {
     title: 'Manager',
@@ -25,7 +27,8 @@ export const ROLE_DETAILS: Record<CompanyRole, {
     borderClass: 'border-cyan-500/40',
     textClass: 'text-cyan-300',
     bgClass: 'bg-cyan-500/20',
-    level: 2
+    level: 2,
+    badgeIcon: '🛡️'
   },
   team_lead: {
     title: 'Team Lead',
@@ -34,7 +37,8 @@ export const ROLE_DETAILS: Record<CompanyRole, {
     borderClass: 'border-purple-500/40',
     textClass: 'text-purple-300',
     bgClass: 'bg-purple-500/20',
-    level: 3
+    level: 3,
+    badgeIcon: '⚡'
   },
   employee: {
     title: 'Employee',
@@ -43,7 +47,8 @@ export const ROLE_DETAILS: Record<CompanyRole, {
     borderClass: 'border-blue-500/40',
     textClass: 'text-blue-300',
     bgClass: 'bg-blue-500/20',
-    level: 4
+    level: 4,
+    badgeIcon: '💼'
   },
   intern: {
     title: 'Intern',
@@ -52,7 +57,8 @@ export const ROLE_DETAILS: Record<CompanyRole, {
     borderClass: 'border-slate-500/30',
     textClass: 'text-slate-300',
     bgClass: 'bg-slate-500/20',
-    level: 5
+    level: 5,
+    badgeIcon: '🎓'
   },
 };
 

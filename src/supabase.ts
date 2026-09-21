@@ -32,8 +32,36 @@ type ChangeHandler = (payload: {
 
 const changeHandlers: { [table: string]: Set<ChangeHandler> } = {};
 
+let currentPresence: { username: string; avatar?: string } | null = null;
+
 if (typeof window !== 'undefined') {
   const s = getSocket();
+
+  s.on('connect', () => {
+    if (currentPresence && currentPresence.username) {
+      s.emit('join', currentPresence);
+    }
+  });
+
+  s.on('chat_message_sync', (payload: any) => {
+    const handlers = changeHandlers['messages'];
+    if (handlers && payload?.message) {
+      const synthetic = {
+        table: 'messages',
+        eventType: (payload.eventType || 'INSERT') as 'INSERT' | 'UPDATE' | 'DELETE',
+        new: payload.message,
+        old: payload.eventType === 'DELETE' ? payload.message : undefined,
+      };
+      handlers.forEach((fn) => {
+        try {
+          fn(synthetic);
+        } catch (e) {
+          console.error('Error in chat_message_sync handler:', e);
+        }
+      });
+    }
+  });
+
   s.on('postgres_changes', (payload: any) => {
     const table = payload.table;
     const handlers = changeHandlers[table];
@@ -307,16 +335,18 @@ class RealtimeChannel {
 
   async track(presence: { username: string; avatar?: string; onlineAt?: string }): Promise<void> {
     if (typeof window !== 'undefined') {
-      const s = getSocket();
-      s.emit('join', {
+      currentPresence = {
         username: presence.username,
         avatar: presence.avatar || '',
-      });
+      };
+      const s = getSocket();
+      s.emit('join', currentPresence);
     }
   }
 
   async untrack(): Promise<void> {
     if (typeof window !== 'undefined') {
+      currentPresence = null;
       const s = getSocket();
       s.emit('leave');
     }
