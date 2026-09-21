@@ -133,6 +133,36 @@ async function startServer() {
       socket.broadcast.emit("broadcast_msg", data);
     });
 
+    socket.on("send_message", (msgData: any) => {
+      if (!msgData || !msgData.username) return;
+      const now = new Date().toISOString();
+      const record = {
+        id: msgData.id || `msg-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+        created_at: msgData.created_at || now,
+        type: msgData.type || "text",
+        content: msgData.content || "",
+        username: msgData.username,
+        recipient_username: msgData.recipient_username || null,
+        avatar: msgData.avatar || "",
+        read_by: msgData.read_by || [],
+        reply_to: msgData.reply_to || null,
+        reactions: msgData.reactions || {},
+        media_url: msgData.media_url || null,
+        file_name: msgData.file_name || null,
+        file_size: msgData.file_size || null,
+        duration: msgData.duration || null,
+      };
+      if (!db.messages) db.messages = [];
+      const exIdx = db.messages.findIndex((m) => String(m.id) === String(record.id));
+      if (exIdx >= 0) {
+        db.messages[exIdx] = { ...db.messages[exIdx], ...record };
+      } else {
+        db.messages.push(record);
+      }
+      persistDatabase();
+      broadcastChange("messages", "INSERT", record);
+    });
+
     socket.on("call_signal", (data: any) => {
       // Forward call signal to specific user
       socket.broadcast.emit("call_signal", data);
