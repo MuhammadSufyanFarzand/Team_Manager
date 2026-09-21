@@ -1,0 +1,26 @@
+{
+  "messages": [],
+  "group_settings": [
+    {
+      "id": 1,
+      "name": "Global Company Chat",
+      "description": "Enterprise workspace and communications network",
+      "avatar_url": null,
+      "owner_username": "",
+      "admin_usernames": [],
+      "leader_usernames": [],
+      "user_roles": {},
+      "banned_usernames": [],
+      "ban_appeals": [],
+      "allow_member_add": true,
+      "only_admins_message": false,
+      "pinned_message_id": null
+    }
+  ],
+  "user_profiles": [],
+  "leads": [],
+  "attendance_records": [],
+  "leave_requests": [],
+  "lead_logs": [],
+  "user_daily_stats": []
+}

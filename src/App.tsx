@@ -215,85 +215,36 @@ export default function App() {
   const claimCeoIfUnassigned = async (candidateUsername: string): Promise<boolean> => {
     const cleanCand = candidateUsername.trim();
     if (!cleanCand) return false;
-    const candLower = cleanCand.toLowerCase();
 
     try {
-      // 1. Check local storage or active settings for an already established CEO
-      const localCeo = (localStorage.getItem('chat_company_ceo') || '').trim();
-      const existingOwner = (activeGroupSettings.owner_username || '').trim();
-
-      if (localCeo && localCeo.toLowerCase() !== 'mr saqib' && localCeo.toLowerCase() !== candLower) {
-        return false;
-      }
-      if (existingOwner && existingOwner.toLowerCase() !== 'mr saqib' && existingOwner.toLowerCase() !== candLower) {
-        localStorage.setItem('chat_company_ceo', existingOwner);
-        return false;
-      }
-
-      // 2. Query Supabase group_settings
-      const { data: dbSettings } = await supabase.from('group_settings').select('*').eq('id', 1).maybeSingle();
-      const dbOwner = (dbSettings?.owner_username || '').trim();
-      if (dbOwner && dbOwner.toLowerCase() !== 'mr saqib') {
-        localStorage.setItem('chat_company_ceo', dbOwner);
-        if (dbOwner.toLowerCase() !== candLower) {
+      const resp = await fetch('/api/auth/register-or-claim-ceo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: cleanCand,
+          avatar: userAvatar || localStorage.getItem('chat_avatar') || '',
+          bio: userBio || localStorage.getItem('chat_bio') || '',
+          phone: userPhone || localStorage.getItem('chat_phone') || ''
+        })
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data.group_settings) {
+          setGroupSettings(data.group_settings);
+          localStorage.setItem('chat_group_settings', JSON.stringify(data.group_settings));
+        }
+        if (data.owner_username) {
+          localStorage.setItem('chat_company_ceo', data.owner_username);
+        }
+        if (data.isOwner) {
+          setMediaErrorToast(`👑 Welcome @${cleanCand}! You are designated as the CEO of this company.`);
+          return true;
+        } else {
           return false;
         }
       }
-
-      // 3. Query Supabase user_profiles to verify if candidate is the earliest user
-      const { data: allProfiles } = await supabase
-        .from('user_profiles')
-        .select('username, created_at')
-        .order('created_at', { ascending: true });
-
-      if (allProfiles && allProfiles.length > 0) {
-        const firstEverUser = allProfiles[0].username?.trim();
-        if (firstEverUser && firstEverUser.toLowerCase() !== candLower) {
-          localStorage.setItem('chat_company_ceo', firstEverUser);
-          if (!dbOwner || dbOwner.toLowerCase() === 'mr saqib') {
-            await supabase.from('group_settings').update({ owner_username: firstEverUser }).eq('id', 1);
-          }
-          return false;
-        }
-      }
-
-      // 4. Candidate is the verified first user!
-      const existingAdmins = (dbSettings?.admin_usernames || []).filter((u: string) => u.toLowerCase() !== 'mr saqib');
-      const updated: GroupSettings = {
-        id: 1,
-        name: dbSettings?.name || activeGroupSettings.name || 'Global Chat',
-        description: dbSettings?.description || activeGroupSettings.description || 'Welcome to the global chat room!',
-        avatar_url: dbSettings?.avatar_url || activeGroupSettings.avatar_url || null,
-        owner_username: cleanCand,
-        admin_usernames: Array.from(new Set([...existingAdmins, cleanCand])),
-        leader_usernames: dbSettings?.leader_usernames || [],
-        user_roles: {
-          ...(dbSettings?.user_roles || {}),
-          [candLower]: 'ceo'
-        },
-        banned_usernames: dbSettings?.banned_usernames || []
-      };
-
-      setGroupSettings(updated);
-      localStorage.setItem('chat_group_settings', JSON.stringify(updated));
-      localStorage.setItem('chat_company_ceo', cleanCand);
-
-      try {
-        await supabase.from('group_settings').upsert(updated);
-        await supabase.from('user_profiles').update({ role: 'ceo' }).eq('username', cleanCand);
-      } catch {}
-
-      try {
-        broadcastChannelRef.current?.postMessage({
-          type: 'ANNOUNCE_CEO',
-          payload: { owner_username: cleanCand, groupSettings: updated }
-        });
-      } catch {}
-
-      setMediaErrorToast(`👑 Welcome @${cleanCand}! You have been designated as the CEO of this company.`);
-      return true;
     } catch (err) {
-      console.warn('claimCeo error:', err);
+      console.warn('register-or-claim-ceo error:', err);
     }
     return false;
   };
@@ -654,20 +605,26 @@ export default function App() {
     // Fetch initial messages
     const fetchMessages = async () => {
       try {
-        const cleanUsername = username.replace(/"/g, '\\"');
         const { data, error } = await supabase
           .from('messages')
           .select('*')
-          .or(`recipient_username.is.null,username.ilike."${cleanUsername}",recipient_username.ilike."${cleanUsername}"`)
           .order('created_at', { ascending: true });
         
         if (!error && data && data.length > 0) {
           // Double-check filtering on client side for bulletproof isolation
-          const filteredData = (data as Message[]).filter(m => 
-            !m.recipient_username ||
-            m.username?.toLowerCase() === username?.toLowerCase() ||
-            m.recipient_username?.toLowerCase() === username?.toLowerCase()
-          );
+          const filteredData = (data as Message[]).filter(m => {
+            const isPrivate = Boolean(
+              m.recipient_username &&
+              m.recipient_username !== 'null' &&
+              m.recipient_username !== 'undefined' &&
+              m.recipient_username.trim() !== ''
+            );
+            if (!isPrivate) return true;
+            return (
+              m.username?.toLowerCase() === username?.toLowerCase() ||
+              m.recipient_username?.toLowerCase() === username?.toLowerCase()
+            );
+          });
           
           setMessages(prev => {
             const map = new Map<string, Message>();
@@ -704,8 +661,14 @@ export default function App() {
           if (payload.eventType === 'INSERT') {
             const newMessage = payload.new as Message;
             
-            // Only handle messages if they are public, or sent by me, or sent to me
-            const isForMe = !newMessage.recipient_username ||
+            const isPrivate = Boolean(
+              newMessage.recipient_username &&
+              newMessage.recipient_username !== 'null' &&
+              newMessage.recipient_username !== 'undefined' &&
+              newMessage.recipient_username.trim() !== ''
+            );
+            // Public messages are delivered to everyone; private messages only to the participants
+            const isForMe = !isPrivate ||
                             newMessage.username?.toLowerCase() === username?.toLowerCase() ||
                             newMessage.recipient_username?.toLowerCase() === username?.toLowerCase();
             if (!isForMe) return;
@@ -873,7 +836,9 @@ export default function App() {
     // Handle instant offline on window unload / backgrounding
     const handleUnloadOrHide = () => {
       if (channelRef.current && username) {
-        channelRef.current.untrack();
+        if (typeof channelRef.current.untrack === 'function') {
+          channelRef.current.untrack();
+        }
       }
     };
     window.addEventListener('beforeunload', handleUnloadOrHide);
@@ -883,7 +848,9 @@ export default function App() {
       window.removeEventListener('beforeunload', handleUnloadOrHide);
       window.removeEventListener('pagehide', handleUnloadOrHide);
       if (channelRef.current) {
-        channelRef.current.untrack();
+        if (typeof channelRef.current.untrack === 'function') {
+          channelRef.current.untrack();
+        }
       }
       supabase.removeChannel(subscription);
       channelRef.current = null;
@@ -2460,6 +2427,7 @@ export default function App() {
         try {
           const { data, error } = await supabase.from('messages').insert([
             {
+              id: tempId,
               type: msgType,
               content: finalUrl,
               file_name: fileName,
@@ -2652,6 +2620,7 @@ export default function App() {
       try {
         const { data, error } = await supabase.from('messages').insert([
           {
+            id: messageId,
             type: 'text',
             content: newMessage.content,
             username: newMessage.username,
@@ -2665,10 +2634,13 @@ export default function App() {
         if (data && data[0]) {
           const realMessage = data[0] as Message;
           setMessages(prev => {
-            if (prev.some(m => m.id === realMessage.id)) {
-              return prev.filter(m => m.id !== messageId);
+            const index = prev.findIndex(m => m.id === messageId || m.id === realMessage.id);
+            if (index >= 0) {
+              const updated = [...prev];
+              updated[index] = realMessage;
+              return updated;
             }
-            return prev.map(m => m.id === messageId ? realMessage : m);
+            return [...prev, realMessage];
           });
         } else {
           // If Supabase has an error or table schema mismatch, keep the message locally!
@@ -2845,10 +2817,18 @@ export default function App() {
       if (mSender && currUser && mSender !== currUser && blockedUsers.some(b => (b || '').toLowerCase() === mSender)) {
         return false;
       }
+
+      const isPrivateMessage = Boolean(
+        m.recipient_username &&
+        m.recipient_username !== 'null' &&
+        m.recipient_username !== 'undefined' &&
+        m.recipient_username.trim() !== ''
+      );
+
       if (activePrivateUser) {
-        if (!m.recipient_username) return false;
-        const mRecip = (m.recipient_username || '').toLowerCase();
-        const activeLower = activePrivateUser.toLowerCase();
+        if (!isPrivateMessage) return false;
+        const mRecip = (m.recipient_username || '').toLowerCase().trim();
+        const activeLower = activePrivateUser.toLowerCase().trim();
         const isFromMeToActive =
           currUser &&
           mSender === currUser &&
@@ -2857,9 +2837,9 @@ export default function App() {
           currUser &&
           mSender === activeLower &&
           mRecip === currUser;
-        return isFromMeToActive || isFromActiveToMe;
+        return Boolean(isFromMeToActive || isFromActiveToMe);
       }
-      return !m.recipient_username;
+      return !isPrivateMessage;
     });
 
     if (searchQuery.trim()) {
