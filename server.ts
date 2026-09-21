@@ -4,6 +4,8 @@ import path from "path";
 import fs from "fs";
 import { Server as SocketIOServer } from "socket.io";
 import { createServer as createViteServer } from "vite";
+import { CompanyRole, GroupSettings } from "./src/types";
+import { getUserRole, canManageUser, applyRoleChange, getAllowedAssignableRoles } from "./src/lib/roleHierarchy";
 
 const PORT = 3000;
 const DATA_DIR = path.join(process.cwd(), "data");
@@ -255,6 +257,183 @@ async function startServer() {
     });
   });
 
+  // Dedicated Chat Sync Endpoint: Returns all messages sorted chronologically
+  app.get("/api/chat/sync", (_req, res) => {
+    const messages = [...(db.messages || [])];
+    messages.sort((a, b) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime());
+    return res.json({ data: messages, error: null });
+  });
+
+  // Hierarchical Role Management: Change / Promote / Demote Role
+  app.post("/api/roles/change", (req, res) => {
+    const { actorUsername, targetUsername, newRole } = req.body;
+    if (!actorUsername || !targetUsername || !newRole) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+    const cleanActor = actorUsername.trim();
+    const cleanTarget = targetUsername.trim();
+    const gs = db.group_settings[0] || defaultDatabase.group_settings[0];
+
+    const actorRole = getUserRole(cleanActor, gs);
+    const targetRole = getUserRole(cleanTarget, gs);
+    const ownerLower = (gs.owner_username || "").trim().toLowerCase();
+
+    // Prevent modifying CEO directly unless CEO is transferring ownership
+    if (cleanTarget.toLowerCase() === ownerLower && newRole !== "ceo") {
+      return res.status(403).json({ error: "The CEO role cannot be changed directly! Only current CEO can transfer ownership." });
+    }
+
+    // Check tree hierarchy: actor must be strictly higher in rank than target
+    if (!canManageUser(actorRole, targetRole)) {
+      return res.status(403).json({ error: `Permission Denied: As a ${actorRole}, you cannot modify a ${targetRole}.` });
+    }
+
+    // Check allowed assignable roles for this actor
+    const allowed = getAllowedAssignableRoles(actorRole);
+    if (!allowed.includes(newRole as CompanyRole) && !(actorRole === "ceo" && newRole === "ceo")) {
+      return res.status(403).json({ error: `Permission Denied: As a ${actorRole}, you cannot assign ${newRole}.` });
+    }
+
+    const updated = applyRoleChange(gs, cleanTarget, newRole as CompanyRole);
+    db.group_settings[0] = updated;
+
+    // Update user profile in database
+    const profiles = db.user_profiles || [];
+    const profIdx = profiles.findIndex((p) => p.username?.toLowerCase() === cleanTarget.toLowerCase());
+    if (profIdx >= 0) {
+      profiles[profIdx] = { ...profiles[profIdx], role: newRole };
+      broadcastChange("user_profiles", "UPDATE", profiles[profIdx]);
+    }
+    db.user_profiles = profiles;
+
+    persistDatabase();
+    broadcastChange("group_settings", "UPDATE", updated);
+
+    // Emit live event for all connected clients
+    io.emit("role_changed", {
+      targetUsername: cleanTarget,
+      newRole,
+      actorUsername: cleanActor,
+      updatedSettings: updated,
+    });
+
+    return res.json({ success: true, updatedSettings: updated, newRole });
+  });
+
+  // Hierarchical Role Management: Kick / Remove User from Chat & Company
+  app.post("/api/roles/kick", (req, res) => {
+    const { actorUsername, targetUsername } = req.body;
+    if (!actorUsername || !targetUsername) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+    const cleanActor = actorUsername.trim();
+    const cleanTarget = targetUsername.trim();
+    const targetLower = cleanTarget.toLowerCase();
+    const gs = db.group_settings[0] || defaultDatabase.group_settings[0];
+
+    const ownerLower = (gs.owner_username || "").trim().toLowerCase();
+    if (targetLower === ownerLower) {
+      return res.status(403).json({ error: "The CEO cannot be removed from the company!" });
+    }
+    if (cleanActor.toLowerCase() === targetLower) {
+      return res.status(400).json({ error: "You cannot remove yourself!" });
+    }
+
+    const actorRole = getUserRole(cleanActor, gs);
+    const targetRole = getUserRole(cleanTarget, gs);
+
+    if (!canManageUser(actorRole, targetRole)) {
+      return res.status(403).json({ error: `Permission Denied: As a ${actorRole}, you cannot remove a ${targetRole}.` });
+    }
+
+    // 1. Remove from user_profiles table
+    const profiles = db.user_profiles || [];
+    const targetProf = profiles.find((p) => p.username?.toLowerCase() === targetLower);
+    db.user_profiles = profiles.filter((p) => p.username?.toLowerCase() !== targetLower);
+    if (targetProf) {
+      broadcastChange("user_profiles", "DELETE", targetProf);
+    }
+
+    // 2. Remove from all role lists and add to banned/removed list
+    const updatedAdmins = (gs.admin_usernames || []).filter((u: string) => u.toLowerCase() !== targetLower);
+    const updatedLeaders = (gs.leader_usernames || []).filter((u: string) => u.toLowerCase() !== targetLower);
+    const updatedEmployees = (gs.employee_usernames || []).filter((u: string) => u.toLowerCase() !== targetLower);
+    const updatedInterns = (gs.intern_usernames || []).filter((u: string) => u.toLowerCase() !== targetLower);
+    const currentBanned = gs.banned_usernames || [];
+    const updatedBanned = Array.from(new Set([...currentBanned, cleanTarget]));
+
+    const updatedRoles = { ...(gs.user_roles || {}) };
+    delete updatedRoles[targetLower];
+
+    const updated: GroupSettings = {
+      ...gs,
+      admin_usernames: updatedAdmins,
+      leader_usernames: updatedLeaders,
+      employee_usernames: updatedEmployees,
+      intern_usernames: updatedInterns,
+      banned_usernames: updatedBanned,
+      user_roles: updatedRoles,
+    };
+    db.group_settings[0] = updated;
+
+    persistDatabase();
+    broadcastChange("group_settings", "UPDATE", updated);
+
+    // Live kick alert to target and all users
+    io.emit("user_kicked", {
+      username: cleanTarget,
+      actor: cleanActor,
+      role: targetRole,
+    });
+
+    return res.json({ success: true, kickedUsername: cleanTarget });
+  });
+
+  // Hierarchical Role Management: Ban / Unban User from Chat
+  app.post("/api/roles/ban", (req, res) => {
+    const { actorUsername, targetUsername, ban } = req.body;
+    if (!actorUsername || !targetUsername) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+    const cleanActor = actorUsername.trim();
+    const cleanTarget = targetUsername.trim();
+    const targetLower = cleanTarget.toLowerCase();
+    const gs = db.group_settings[0] || defaultDatabase.group_settings[0];
+
+    const ownerLower = (gs.owner_username || "").trim().toLowerCase();
+    if (targetLower === ownerLower) {
+      return res.status(403).json({ error: "The CEO cannot be banned!" });
+    }
+
+    const actorRole = getUserRole(cleanActor, gs);
+    const targetRole = getUserRole(cleanTarget, gs);
+
+    if (!canManageUser(actorRole, targetRole)) {
+      return res.status(403).json({ error: `Permission Denied: As a ${actorRole}, you cannot ban a ${targetRole}.` });
+    }
+
+    let updatedBanned = (gs.banned_usernames || []).filter((u: string) => u.toLowerCase() !== targetLower);
+    if (ban !== false) {
+      updatedBanned.push(cleanTarget);
+    }
+    const updated: GroupSettings = {
+      ...gs,
+      banned_usernames: Array.from(new Set(updatedBanned)),
+    };
+    db.group_settings[0] = updated;
+
+    persistDatabase();
+    broadcastChange("group_settings", "UPDATE", updated);
+
+    io.emit("user_banned_status", {
+      username: cleanTarget,
+      isBanned: ban !== false,
+      actor: cleanActor,
+    });
+
+    return res.json({ success: true, banned: ban !== false, target: cleanTarget });
+  });
+
   // REST generic query endpoint
   app.get("/api/db/:table", (req, res) => {
     const { table } = req.params;
@@ -302,7 +481,7 @@ async function startServer() {
     return res.json({ data: records, error: null });
   });
 
-  // Insert endpoint
+  // Insert endpoint (with duplicate-prevention)
   app.post("/api/db/:table", (req, res) => {
     const { table } = req.params;
     if (!db[table]) db[table] = [];
@@ -313,14 +492,29 @@ async function startServer() {
 
     for (const item of items) {
       const now = new Date().toISOString();
-      const record = {
-        id: item.id || `${table}-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
-        created_at: item.created_at || now,
-        ...item,
-      };
-      db[table].push(record);
-      inserted.push(record);
-      broadcastChange(table, "INSERT", record);
+      const recordId = item.id || `${table}-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+      const existingIdx = db[table].findIndex((r) => String(r.id) === String(recordId));
+
+      if (existingIdx >= 0) {
+        const merged = {
+          ...db[table][existingIdx],
+          ...item,
+          id: recordId,
+          updated_at: now,
+        };
+        db[table][existingIdx] = merged;
+        inserted.push(merged);
+        broadcastChange(table, "UPDATE", merged);
+      } else {
+        const record = {
+          id: recordId,
+          created_at: item.created_at || now,
+          ...item,
+        };
+        db[table].push(record);
+        inserted.push(record);
+        broadcastChange(table, "INSERT", record);
+      }
     }
 
     persistDatabase();

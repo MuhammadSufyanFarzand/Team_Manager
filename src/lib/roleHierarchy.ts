@@ -113,7 +113,7 @@ export function canManageUser(actorRole: CompanyRole, targetRole: CompanyRole): 
 export function getAllowedAssignableRoles(actorRole: CompanyRole): CompanyRole[] {
   switch (actorRole) {
     case 'ceo':
-      return ['manager', 'team_lead', 'employee', 'intern'];
+      return ['ceo', 'manager', 'team_lead', 'employee', 'intern'];
     case 'manager':
       return ['team_lead', 'employee', 'intern'];
     case 'team_lead':

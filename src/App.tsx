@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { supabase } from './supabase';
+import { supabase, getSocket } from './supabase';
 import { Message, GroupSettings, UserProfile, OnlineUser, BanAppeal, MessageType, UserDailyStats, CompanyRole, ROLE_HIERARCHY } from './types';
 import { Send, Image as ImageIcon, User, Bell, BellOff, BellRing, Volume2, VolumeX, Edit2, Trash2, Check, CheckCheck, X, Info, Copy, ExternalLink, Reply, Settings, Camera, Loader2, Shield, ShieldAlert, ShieldCheck, GraduationCap, Crown, Users, Lock, Mail, Phone, FileText, LogOut, Eye, EyeOff, Clock, Circle, Ban, UserX, UserCheck, UserMinus, AlertTriangle, Mic, MicOff, Play, Pause, Download, Video as VideoIcon, Music, Paperclip, Plus, FileArchive, Star, Sparkles, ShoppingBag, Gift, Activity, BarChart2, Search, Forward, SmilePlus, PhoneCall, PhoneOff, Briefcase, MoreVertical, ArrowLeft } from 'lucide-react';
 import { uploadToCloudinary, getCloudinaryDownloadUrl } from './lib/cloudinary';
@@ -857,6 +857,115 @@ export default function App() {
     };
   }, [isJoined, username, notificationsEnabled, userAvatar]);
 
+  // Real-time Chat Sync polling & Socket.IO events for instantaneous cross-client synchronization
+  useEffect(() => {
+    if (!isJoined || !username) return;
+
+    const s = getSocket();
+    const handleKicked = (payload: { username: string; actor: string; role: string }) => {
+      if (payload?.username && payload.username.toLowerCase() === username.toLowerCase()) {
+        alert(`You have been removed from the company chat by @${payload.actor}. Access has been revoked.`);
+        handleLogout();
+      }
+    };
+
+    const handleRoleChanged = (payload: { targetUsername: string; newRole: CompanyRole; actorUsername: string; updatedSettings: GroupSettings }) => {
+      if (payload?.updatedSettings) {
+        setGroupSettings(payload.updatedSettings);
+        localStorage.setItem('chat_group_settings', JSON.stringify(payload.updatedSettings));
+      }
+      if (payload?.targetUsername && payload.targetUsername.toLowerCase() === username.toLowerCase()) {
+        const details = ROLE_DETAILS[payload.newRole];
+        setMediaErrorToast(`Your corporate rank was updated to ${details?.title || payload.newRole} by @${payload.actorUsername}`);
+      }
+    };
+
+    const handleBannedStatus = (payload: { username: string; isBanned: boolean; actor: string }) => {
+      if (payload?.username && payload.username.toLowerCase() === username.toLowerCase()) {
+        if (payload.isBanned) {
+          setMediaErrorToast(`⚠️ You have been banned from sending messages by @${payload.actor}.`);
+        } else {
+          setMediaErrorToast(`✅ You have been unbanned from chat by @${payload.actor}.`);
+        }
+      }
+    };
+
+    s.on('user_kicked', handleKicked);
+    s.on('role_changed', handleRoleChanged);
+    s.on('user_banned_status', handleBannedStatus);
+
+    let isMounted = true;
+    const pollSync = async () => {
+      try {
+        const res = await fetch('/api/chat/sync');
+        if (!res.ok) return;
+        const { data } = await res.json();
+        if (data && Array.isArray(data) && isMounted) {
+          const myUser = username.toLowerCase();
+          setMessages(prev => {
+            const relevantIncoming: Message[] = data.filter((m: Message) => {
+              const isPrivate = Boolean(
+                m.recipient_username &&
+                m.recipient_username !== 'null' &&
+                m.recipient_username !== 'undefined' &&
+                m.recipient_username.trim() !== ''
+              );
+              if (!isPrivate) return true;
+              const sender = (m.username || '').toLowerCase();
+              const recipient = (m.recipient_username || '').toLowerCase();
+              return sender === myUser || recipient === myUser;
+            });
+
+            const prevMap = new Map(prev.map(m => [m.id, m]));
+            let changed = false;
+            for (const inc of relevantIncoming) {
+              const existing = prevMap.get(inc.id);
+              if (!existing) {
+                prevMap.set(inc.id, inc);
+                changed = true;
+              } else if (
+                existing.content !== inc.content ||
+                existing.is_edited !== inc.is_edited ||
+                JSON.stringify(existing.reactions) !== JSON.stringify(inc.reactions) ||
+                JSON.stringify(existing.read_by) !== JSON.stringify(inc.read_by)
+              ) {
+                prevMap.set(inc.id, { ...existing, ...inc });
+                changed = true;
+              }
+            }
+
+            const incomingIds = new Set(relevantIncoming.map(m => m.id));
+            const now = Date.now();
+            const filtered = Array.from(prevMap.values()).filter(m => {
+              if (incomingIds.has(m.id)) return true;
+              if (m.id.startsWith('temp-') || (m.id.startsWith('msg-') && (now - new Date(m.created_at).getTime() < 10000))) {
+                return true;
+              }
+              changed = true;
+              return false;
+            });
+
+            if (!changed && filtered.length === prev.length) {
+              return prev;
+            }
+
+            return filtered.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+          });
+        }
+      } catch {}
+    };
+
+    const intervalId = setInterval(pollSync, 2500);
+
+    return () => {
+      isMounted = false;
+      clearInterval(intervalId);
+      s.off('user_kicked', handleKicked);
+      s.off('role_changed', handleRoleChanged);
+      s.off('user_banned_status', handleBannedStatus);
+    };
+  }, [isJoined, username]);
+
   useEffect(() => {
     if (!isJoined || !username) return;
 
@@ -1318,6 +1427,17 @@ export default function App() {
   };
 
   const handleDelete = async (id: string) => {
+    const msgToDelete = messages.find(m => m.id === id);
+    if (!msgToDelete) return;
+    const isMine = msgToDelete.username?.toLowerCase() === (username || '').toLowerCase();
+    const msgRole = getUserRole(msgToDelete.username, activeGroupSettings);
+    const canDelete = isMine || isOwner || canManageUser(currentUserRole, msgRole);
+
+    if (!canDelete) {
+      alert(`Permission Denied: As a ${ROLE_DETAILS[currentUserRole].title}, you cannot delete messages sent by a ${ROLE_DETAILS[msgRole].title}.`);
+      return;
+    }
+
     setMessages(prev => prev.filter(m => m.id !== id));
     try {
       broadcastChannelRef.current?.postMessage({
@@ -1765,26 +1885,40 @@ export default function App() {
       return;
     }
 
-    const updated = applyRoleChange(activeGroupSettings, cleanTarget, newRole);
-    setGroupSettings(updated);
-    localStorage.setItem('chat_group_settings', JSON.stringify(updated));
-
-    // Broadcast change across tabs
     try {
-      broadcastChannelRef.current?.postMessage({
-        type: 'ROLE_UPDATE',
-        payload: { targetUsername: cleanTarget, newRole, updatedSettings: updated }
+      const resp = await fetch('/api/roles/change', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          actorUsername: username,
+          targetUsername: cleanTarget,
+          newRole
+        })
       });
-    } catch {}
+      const data = await resp.json();
+      if (!resp.ok) {
+        alert(data.error || 'Failed to change role');
+        return;
+      }
 
-    try {
-      await supabase.from('group_settings').upsert(updated);
-      await supabase.from('user_profiles').update({ role: newRole }).eq('username', cleanTarget);
-    } catch (err) {
-      console.warn('Supabase role update sync (stored locally):', err);
+      if (data.updatedSettings) {
+        setGroupSettings(data.updatedSettings);
+        localStorage.setItem('chat_group_settings', JSON.stringify(data.updatedSettings));
+      }
+
+      // Broadcast change across tabs
+      try {
+        broadcastChannelRef.current?.postMessage({
+          type: 'ROLE_UPDATE',
+          payload: { targetUsername: cleanTarget, newRole, updatedSettings: data.updatedSettings || activeGroupSettings }
+        });
+      } catch {}
+
+      setMediaErrorToast(`Role of @${cleanTarget} set to ${ROLE_DETAILS[newRole].title} (${ROLE_DETAILS[newRole].urduTitle}).`);
+    } catch (err: any) {
+      console.error('Role change error:', err);
+      alert('Failed to change role over network');
     }
-
-    setMediaErrorToast(`Role of @${cleanTarget} set to ${ROLE_DETAILS[newRole].title} (${ROLE_DETAILS[newRole].urduTitle}).`);
   };
 
   const makeLeader = (targetUsername: string) => changeUserRole(targetUsername, 'team_lead');
@@ -1799,27 +1933,44 @@ export default function App() {
     }
     const cleanTarget = targetUsername.trim();
     if (confirm(`Are you sure you want to appoint @${cleanTarget} as the new CEO? You will remain as a Manager.`)) {
-      const updated = applyRoleChange(activeGroupSettings, cleanTarget, 'ceo');
-      setGroupSettings(updated);
-      localStorage.setItem('chat_group_settings', JSON.stringify(updated));
-      localStorage.setItem('chat_company_ceo', cleanTarget);
-
       try {
-        broadcastChannelRef.current?.postMessage({
-          type: 'ROLE_UPDATE',
-          payload: { updatedSettings: updated }
+        const resp = await fetch('/api/roles/change', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            actorUsername: username,
+            targetUsername: cleanTarget,
+            newRole: 'ceo'
+          })
         });
-        broadcastChannelRef.current?.postMessage({
-          type: 'ANNOUNCE_CEO',
-          payload: { owner_username: cleanTarget, groupSettings: updated }
-        });
-      } catch {}
+        const data = await resp.json();
+        if (!resp.ok) {
+          alert(data.error || 'Failed to transfer ownership');
+          return;
+        }
 
-      try {
-        await supabase.from('group_settings').upsert(updated);
-      } catch (e) {}
+        if (data.updatedSettings) {
+          setGroupSettings(data.updatedSettings);
+          localStorage.setItem('chat_group_settings', JSON.stringify(data.updatedSettings));
+        }
+        localStorage.setItem('chat_company_ceo', cleanTarget);
 
-      setMediaErrorToast(`👑 CEO role has been assigned to @${cleanTarget}.`);
+        try {
+          broadcastChannelRef.current?.postMessage({
+            type: 'ROLE_UPDATE',
+            payload: { updatedSettings: data.updatedSettings || activeGroupSettings }
+          });
+          broadcastChannelRef.current?.postMessage({
+            type: 'ANNOUNCE_CEO',
+            payload: { owner_username: cleanTarget, groupSettings: data.updatedSettings || activeGroupSettings }
+          });
+        } catch {}
+
+        setMediaErrorToast(`👑 CEO role has been assigned to @${cleanTarget}.`);
+      } catch (e: any) {
+        console.error('Transfer ownership error:', e);
+        alert('Failed to transfer ownership over network');
+      }
     }
   };
 
@@ -1850,52 +2001,31 @@ export default function App() {
     }
 
     try {
-      // 1. Delete from Supabase user_profiles table
-      await supabase.from('user_profiles').delete().eq('username', cleanTarget);
+      const resp = await fetch('/api/roles/kick', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          actorUsername: username,
+          targetUsername: cleanTarget
+        })
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        alert(data.error || 'Failed to remove member');
+        return;
+      }
 
-      // 2. Remove from all role lists and add to banned_usernames
-      const updatedAdmins = (activeGroupSettings.admin_usernames || []).filter(u => u.toLowerCase() !== targetLower);
-      const updatedLeaders = (activeGroupSettings.leader_usernames || []).filter(u => u.toLowerCase() !== targetLower);
-      const updatedEmployees = (activeGroupSettings.employee_usernames || []).filter(u => u.toLowerCase() !== targetLower);
-      const updatedInterns = (activeGroupSettings.intern_usernames || []).filter(u => u.toLowerCase() !== targetLower);
-      const currentBanned = activeGroupSettings.banned_usernames || [];
-      const updatedBanned = Array.from(new Set([...currentBanned, cleanTarget]));
-
-      const updatedRoles = { ...(activeGroupSettings.user_roles || {}) };
-      delete updatedRoles[targetLower];
-
-      const updated: GroupSettings = {
-        ...activeGroupSettings,
-        admin_usernames: updatedAdmins,
-        leader_usernames: updatedLeaders,
-        employee_usernames: updatedEmployees,
-        intern_usernames: updatedInterns,
-        banned_usernames: updatedBanned,
-        user_roles: updatedRoles
-      };
-
-      setGroupSettings(updated);
-      localStorage.setItem('chat_group_settings', JSON.stringify(updated));
+      setGroupMembers(prev => prev.filter(m => m.username.toLowerCase() !== targetLower));
+      if (viewProfileUser && viewProfileUser.username.toLowerCase() === targetLower) {
+        setViewProfileUser(null);
+      }
 
       try {
         broadcastChannelRef.current?.postMessage({
           type: 'KICKED_FROM_COMPANY',
           payload: { username: cleanTarget }
         });
-        broadcastChannelRef.current?.postMessage({
-          type: 'ROLE_UPDATE',
-          payload: { updatedSettings: updated }
-        });
       } catch {}
-
-      await supabase.from('group_settings').upsert(updated);
-
-      // 3. Update local state
-      setGroupMembers(prev => prev.filter(m => m.username.toLowerCase() !== targetLower));
-
-      if (viewProfileUser && viewProfileUser.username.toLowerCase() === targetLower) {
-        setViewProfileUser(null);
-      }
 
       setMediaErrorToast(`@${cleanTarget} (${roleTitle}) has been removed from the company.`);
     } catch (err: any) {
@@ -1908,14 +2038,8 @@ export default function App() {
 
   const banUser = async (targetUsername: string) => {
     const cleanTarget = targetUsername.trim();
-    const targetLower = cleanTarget.toLowerCase();
     const myRole = currentUserRole;
     const targetRole = getUserRole(cleanTarget, activeGroupSettings);
-
-    if (targetLower === ownerLower) {
-      alert("The CEO cannot be banned!");
-      return;
-    }
 
     if (!canManageUser(myRole, targetRole)) {
       alert(`Permission Denied: As a ${ROLE_DETAILS[myRole].title}, you cannot ban a ${ROLE_DETAILS[targetRole].title}.`);
@@ -1923,26 +2047,38 @@ export default function App() {
     }
 
     if (confirm(`Are you sure you want to BAN @${cleanTarget}? They will be blocked from sending or viewing chat messages.`)) {
-      const currentBanned = activeGroupSettings.banned_usernames || [];
-      if (currentBanned.some(b => b.toLowerCase() === targetLower)) return;
-      
-      const newBanned = [...currentBanned, cleanTarget];
-      const updated: GroupSettings = {
-        ...activeGroupSettings,
-        banned_usernames: newBanned
-      };
-      setGroupSettings(updated);
-      localStorage.setItem('chat_group_settings', JSON.stringify(updated));
-
       try {
-        broadcastChannelRef.current?.postMessage({
-          type: 'ROLE_UPDATE',
-          payload: { updatedSettings: updated }
+        const resp = await fetch('/api/roles/ban', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            actorUsername: username,
+            targetUsername: cleanTarget,
+            ban: true
+          })
         });
-        await supabase.from('group_settings').upsert(updated);
-        setMediaErrorToast(`@${cleanTarget} has been banned.`);
+        const data = await resp.json();
+        if (!resp.ok) {
+          alert(data.error || 'Failed to ban user');
+          return;
+        }
+
+        const currentBanned = activeGroupSettings.banned_usernames || [];
+        const updatedBanned = Array.from(new Set([...currentBanned, cleanTarget]));
+        const updated = { ...activeGroupSettings, banned_usernames: updatedBanned };
+        setGroupSettings(updated);
+        localStorage.setItem('chat_group_settings', JSON.stringify(updated));
+
+        try {
+          broadcastChannelRef.current?.postMessage({
+            type: 'ROLE_UPDATE',
+            payload: { updatedSettings: updated }
+          });
+        } catch {}
+
+        setMediaErrorToast(`@${cleanTarget} has been banned from chat.`);
       } catch (err) {
-        console.error('Supabase banUser sync error:', err);
+        console.error('banUser error:', err);
       }
     }
   };
@@ -1957,28 +2093,44 @@ export default function App() {
       return;
     }
 
-    const currentBanned = activeGroupSettings.banned_usernames || [];
-    const newBanned = currentBanned.filter(b => b.toLowerCase() !== cleanTarget.toLowerCase());
-    const currentAppeals = activeGroupSettings.ban_appeals || [];
-    const newAppeals = currentAppeals.filter(a => a.username.toLowerCase() !== cleanTarget.toLowerCase());
-
-    const updated: GroupSettings = {
-      ...activeGroupSettings,
-      banned_usernames: newBanned,
-      ban_appeals: newAppeals
-    };
-    setGroupSettings(updated);
-    localStorage.setItem('chat_group_settings', JSON.stringify(updated));
-
     try {
-      broadcastChannelRef.current?.postMessage({
-        type: 'ROLE_UPDATE',
-        payload: { updatedSettings: updated }
+      const resp = await fetch('/api/roles/ban', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          actorUsername: username,
+          targetUsername: cleanTarget,
+          ban: false
+        })
       });
-      await supabase.from('group_settings').upsert(updated);
+      const data = await resp.json();
+      if (!resp.ok) {
+        alert(data.error || 'Failed to unban user');
+        return;
+      }
+
+      const currentBanned = activeGroupSettings.banned_usernames || [];
+      const updatedBanned = currentBanned.filter(b => b.toLowerCase() !== cleanTarget.toLowerCase());
+      const currentAppeals = activeGroupSettings.ban_appeals || [];
+      const newAppeals = currentAppeals.filter(a => a.username.toLowerCase() !== cleanTarget.toLowerCase());
+      const updated = {
+        ...activeGroupSettings,
+        banned_usernames: updatedBanned,
+        ban_appeals: newAppeals
+      };
+      setGroupSettings(updated);
+      localStorage.setItem('chat_group_settings', JSON.stringify(updated));
+
+      try {
+        broadcastChannelRef.current?.postMessage({
+          type: 'ROLE_UPDATE',
+          payload: { updatedSettings: updated }
+        });
+      } catch {}
+
       setMediaErrorToast(`@${cleanTarget} unbanned.`);
     } catch (err) {
-      console.error('Supabase unbanUser sync error:', err);
+      console.error('unbanUser error:', err);
     }
   };
 
@@ -3958,27 +4110,38 @@ export default function App() {
                                 <Edit2 className="w-4 h-4" /> Edit
                               </button>
                             )}
-                            {(isMine || isOwner) && (
-                              <button onClick={(e) => { e.stopPropagation(); handleDelete(msg.id); setActiveMessageId(null); }} className="p-2 text-red-400 bg-red-400/10 hover:bg-red-400/20 rounded-xl transition-colors flex items-center gap-1.5 text-xs font-medium">
-                                <Trash2 className="w-4 h-4" /> Delete
-                              </button>
-                            )}
-                            {isOwner && !isMine && activeGroupSettings.owner_username?.toLowerCase() !== msg.username?.toLowerCase() && (
-                              <>
-                                {!activeGroupSettings.admin_usernames?.some(a => a.toLowerCase() === msg.username?.toLowerCase()) ? (
-                                  <button onClick={(e) => { e.stopPropagation(); makeAdmin(msg.username); setActiveMessageId(null); }} className="p-2 text-yellow-400 bg-yellow-400/10 hover:bg-yellow-400/20 rounded-xl transition-colors flex items-center gap-1.5 text-xs font-medium">
-                                    <Shield className="w-4 h-4" /> Make Admin
-                                  </button>
-                                ) : (
-                                  <button onClick={(e) => { e.stopPropagation(); dismissAdmin(msg.username); setActiveMessageId(null); }} className="p-2 text-orange-400 bg-orange-400/10 hover:bg-orange-400/20 rounded-xl transition-colors flex items-center gap-1.5 text-xs font-medium">
-                                    <ShieldAlert className="w-4 h-4" /> Dismiss Admin
-                                  </button>
-                                )}
-                                <button onClick={(e) => { e.stopPropagation(); transferOwnership(msg.username); setActiveMessageId(null); }} className="p-2 text-purple-400 bg-purple-400/10 hover:bg-purple-400/20 rounded-xl transition-colors flex items-center gap-1.5 text-xs font-medium">
-                                  <Crown className="w-4 h-4" /> Transfer Ownership
-                                </button>
-                              </>
-                            )}
+                            {(() => {
+                              const msgRole = getUserRole(msg.username, activeGroupSettings);
+                              const canDeleteMsg = isMine || isOwner || canManageUser(currentUserRole, msgRole);
+                              const canManageAuthor = !isMine && canManageUser(currentUserRole, msgRole);
+
+                              return (
+                                <>
+                                  {canDeleteMsg && (
+                                    <button 
+                                      onClick={(e) => { e.stopPropagation(); handleDelete(msg.id); setActiveMessageId(null); }} 
+                                      className="p-2 text-red-400 bg-red-400/10 hover:bg-red-400/20 rounded-xl transition-colors flex items-center gap-1.5 text-xs font-medium cursor-pointer"
+                                      title={isMine ? "Delete your message" : `Delete message as superior (${ROLE_DETAILS[currentUserRole].title})`}
+                                    >
+                                      <Trash2 className="w-4 h-4" /> Delete
+                                    </button>
+                                  )}
+                                  {canManageAuthor && (
+                                    <button 
+                                      onClick={(e) => { 
+                                        e.stopPropagation(); 
+                                        openUserProfileCard(msg.username); 
+                                        setActiveMessageId(null); 
+                                      }} 
+                                      className="p-2 text-cyan-300 bg-cyan-400/10 hover:bg-cyan-400/20 rounded-xl transition-colors flex items-center gap-1.5 text-xs font-medium cursor-pointer"
+                                      title={`Manage subordinate @${msg.username} (${ROLE_DETAILS[msgRole].title})`}
+                                    >
+                                      <Shield className="w-4 h-4" /> Manage Member
+                                    </button>
+                                  )}
+                                </>
+                              );
+                            })()}
                             </div>
                           </motion.div>
                         )}
@@ -5019,26 +5182,7 @@ export default function App() {
                                   <span className="text-xs font-bold text-white truncate group-hover:text-cyan-300 transition-colors">
                                     {member.username?.toLowerCase() === username?.toLowerCase() ? `${member.username} (You)` : member.username}
                                   </span>
-                                  {isMemberOwner && (
-                                    <span className="inline-flex items-center gap-1 bg-yellow-500/20 text-yellow-300 text-[9px] font-bold px-1.5 py-0.5 rounded-md border border-yellow-500/30">
-                                      <Crown className="w-2.5 h-2.5" /> CEO
-                                    </span>
-                                  )}
-                                  {!isMemberOwner && isMemberAdmin && (
-                                    <span className="inline-flex items-center gap-1 bg-cyan-500/20 text-cyan-300 text-[9px] font-bold px-1.5 py-0.5 rounded-md border border-cyan-500/30">
-                                      <Shield className="w-2.5 h-2.5" /> Manager
-                                    </span>
-                                  )}
-                                  {!isMemberOwner && !isMemberAdmin && (
-                                    <span className="inline-flex items-center gap-1 bg-slate-500/20 text-slate-300 text-[9px] font-medium px-1.5 py-0.5 rounded-md border border-slate-500/30">
-                                      <User className="w-2.5 h-2.5 text-slate-400" /> Member
-                                    </span>
-                                  )}
-                                  {isMemberLeader && (
-                                    <span className="inline-flex items-center gap-1 bg-emerald-500/20 text-emerald-300 text-[9px] font-bold px-1.5 py-0.5 rounded-md border border-emerald-500/30">
-                                      <Star className="w-2.5 h-2.5 fill-emerald-300" /> Leader
-                                    </span>
-                                  )}
+                                  {renderRoleBadge(member.username, 'sm')}
                                 </div>
                                 <p className={cn("text-[10px] flex items-center gap-1 mt-0.5", isUserOnline ? "text-green-400 font-medium" : "text-white/50")}>
                                   <Clock className="w-2.5 h-2.5 opacity-70" />
@@ -5065,146 +5209,74 @@ export default function App() {
                               </button>
                             )}
 
-                            {/* Remove Member Action (CEO can remove Manager/Member, Manager can remove Member) */}
+                            {/* Comprehensive Tree-Based Hierarchical Controls */}
                             {(() => {
-                              if (member.username.toLowerCase() === username.toLowerCase()) return null;
-                              const isTargetCEO = isMemberOwner;
-                              const isTargetManager = isMemberAdmin;
-                              const canRemove = (isOwner && !isTargetCEO) || (isAdmin && !isOwner && !isTargetCEO && !isTargetManager);
-                              if (!canRemove) return null;
-
-                              return (
-                                <button
-                                  type="button"
-                                  onClick={() => removeMember(member.username)}
-                                  className="px-2.5 py-1 rounded-lg bg-red-600/30 hover:bg-red-600/50 text-red-200 text-[10px] font-semibold border border-red-500/50 transition-colors flex items-center gap-1 cursor-pointer"
-                                  title={`Remove ${isTargetManager ? 'Manager' : 'Team Member'} @${member.username} from company`}
-                                >
-                                  <Trash2 className="w-3 h-3 text-red-400" />
-                                  <span>Remove</span>
-                                </button>
-                              );
-                            })()}
-
-                            {/* Block / Unblock action */}
-                            {member.username.toLowerCase() !== username.toLowerCase() && member.username.toLowerCase() !== ownerLower && (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  if (blockedUsers.some(b => b.toLowerCase() === member.username.toLowerCase())) {
-                                    unblockUser(member.username);
-                                  } else {
-                                    blockUser(member.username);
-                                  }
-                                }}
-                                className={cn(
-                                  "px-2.5 py-1 rounded-lg text-[10px] font-semibold border transition-colors flex items-center gap-1 cursor-pointer",
-                                  blockedUsers.some(b => b.toLowerCase() === member.username.toLowerCase())
-                                    ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/40 hover:bg-cyan-500/30"
-                                    : "bg-white/5 text-white/70 border-white/10 hover:bg-white/10"
-                                )}
-                                title={blockedUsers.some(b => b.toLowerCase() === member.username.toLowerCase()) ? "Unblock User" : "Block User"}
-                              >
-                                <UserX className="w-3 h-3" />
-                                <span>{blockedUsers.some(b => b.toLowerCase() === member.username.toLowerCase()) ? "Unblock" : "Block"}</span>
-                              </button>
-                            )}
-
-                            {/* Ban / Unban Action (CEO can ban anyone except self, Manager can only ban regular members) */}
-                            {(() => {
-                              if (member.username.toLowerCase() === username.toLowerCase()) return null;
-                              const isTargetCEO = isMemberOwner;
-                              const isTargetManager = isMemberAdmin;
-                              const canBan = (isOwner && !isTargetCEO) || (isAdmin && !isOwner && !isTargetCEO && !isTargetManager);
-                              if (!canBan) return null;
-
+                              const isSelf = member.username.toLowerCase() === username.toLowerCase();
+                              if (isSelf) return null;
+                              const memberRole = getUserRole(member.username, activeGroupSettings);
+                              const canManage = canManageUser(currentUserRole, memberRole);
+                              const allowedRoles = getAllowedAssignableRoles(currentUserRole);
                               const isTargetBanned = (activeGroupSettings.banned_usernames || []).some(b => b.toLowerCase() === member.username.toLowerCase());
+
+                              if (!canManage) return null;
+
                               return (
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    if (isTargetBanned) {
-                                      unbanUser(member.username);
-                                    } else {
-                                      banUser(member.username);
-                                    }
-                                  }}
-                                  className={cn(
-                                    "px-2.5 py-1 rounded-lg text-[10px] font-semibold border transition-colors flex items-center gap-1 cursor-pointer",
-                                    isTargetBanned
-                                      ? "bg-green-500/20 text-green-300 border-green-500/40 hover:bg-green-500/30"
-                                      : "bg-red-500/20 text-red-300 border-red-500/40 hover:bg-red-500/30"
-                                  )}
-                                  title={isTargetBanned ? "Unban User" : "Ban User"}
-                                >
-                                  <Ban className="w-3 h-3" />
-                                  <span>{isTargetBanned ? "Unban" : "Ban"}</span>
-                                </button>
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  {/* Role selector */}
+                                  <div className="flex items-center gap-1 bg-black/50 border border-white/20 rounded-lg px-2 py-1">
+                                    <span className="text-[10px] text-white/60">Set:</span>
+                                    <select
+                                      value={memberRole}
+                                      onChange={(e) => changeUserRole(member.username, e.target.value as CompanyRole)}
+                                      className="bg-transparent text-[11px] font-bold text-cyan-300 focus:outline-hidden cursor-pointer"
+                                      title={`Assign subordinate role as ${ROLE_DETAILS[currentUserRole].title}`}
+                                    >
+                                      <option value={memberRole} disabled className="bg-slate-900 text-white">
+                                        Current: {ROLE_DETAILS[memberRole].title}
+                                      </option>
+                                      {allowedRoles.map((r) => (
+                                        <option key={r} value={r} className="bg-slate-900 text-white">
+                                          {r === 'ceo' ? '👑 Transfer CEO' : `Set as ${ROLE_DETAILS[r].title}`}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </div>
+
+                                  {/* Ban / Unban */}
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      if (isTargetBanned) {
+                                        unbanUser(member.username);
+                                      } else {
+                                        banUser(member.username);
+                                      }
+                                    }}
+                                    className={cn(
+                                      "px-2.5 py-1 rounded-lg text-[10px] font-semibold border transition-colors flex items-center gap-1 cursor-pointer",
+                                      isTargetBanned
+                                        ? "bg-green-500/20 text-green-300 border-green-500/40 hover:bg-green-500/30"
+                                        : "bg-red-500/20 text-red-300 border-red-500/40 hover:bg-red-500/30"
+                                    )}
+                                    title={isTargetBanned ? "Unban from chat" : "Ban from chat"}
+                                  >
+                                    <Ban className="w-3 h-3" />
+                                    <span>{isTargetBanned ? "Unban" : "Ban"}</span>
+                                  </button>
+
+                                  {/* Kick / Remove */}
+                                  <button
+                                    type="button"
+                                    onClick={() => removeMember(member.username)}
+                                    className="px-2.5 py-1 rounded-lg bg-red-600/30 hover:bg-red-600/50 text-red-200 text-[10px] font-semibold border border-red-500/50 transition-colors flex items-center gap-1 cursor-pointer"
+                                    title={`Kick @${member.username} from the company`}
+                                  >
+                                    <Trash2 className="w-3 h-3 text-red-400" />
+                                    <span>Kick</span>
+                                  </button>
+                                </div>
                               );
                             })()}
-
-                            {/* CEO exclusive admin actions */}
-                            {isOwner && member.username.toLowerCase() !== username.toLowerCase() && (
-                              <>
-                                {!isMemberAdmin ? (
-                                  <button
-                                    type="button"
-                                    onClick={() => makeAdmin(member.username)}
-                                    className="px-2.5 py-1 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 text-[10px] font-semibold border border-cyan-500/40 transition-colors cursor-pointer"
-                                    title="Promote to Manager"
-                                  >
-                                    Make Manager
-                                  </button>
-                                ) : (
-                                  !isMemberOwner && (
-                                    <button
-                                      type="button"
-                                      onClick={() => dismissAdmin(member.username)}
-                                      className="px-2.5 py-1 rounded-lg bg-orange-500/20 hover:bg-orange-500/30 text-orange-300 text-[10px] font-semibold border border-orange-500/40 transition-colors cursor-pointer"
-                                      title="Dismiss Manager"
-                                    >
-                                      Dismiss Manager
-                                    </button>
-                                  )
-                                )}
-                                {!isMemberOwner && (
-                                  <button
-                                    type="button"
-                                    onClick={() => transferOwnership(member.username)}
-                                    className="px-2.5 py-1 rounded-lg bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-300 text-[10px] font-semibold border border-yellow-500/40 transition-colors cursor-pointer flex items-center gap-1"
-                                    title="Appoint as Company CEO"
-                                  >
-                                    <Crown className="w-3 h-3 text-yellow-400" />
-                                    <span>Make CEO</span>
-                                  </button>
-                                )}
-                              </>
-                            )}
-
-                            {/* Leader Role Assignment by Admin/Owner */}
-                            {isAdmin && (
-                              !isMemberLeader ? (
-                                <button
-                                  type="button"
-                                  onClick={() => makeLeader(member.username)}
-                                  className="px-2.5 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 text-[10px] font-semibold border border-emerald-500/40 transition-colors cursor-pointer flex items-center gap-1"
-                                  title="Set as Leader (Can upload CSV & distribute leads)"
-                                >
-                                  <Star className="w-3 h-3" />
-                                  <span>Make Leader</span>
-                                </button>
-                              ) : (
-                                <button
-                                  type="button"
-                                  onClick={() => dismissLeader(member.username)}
-                                  className="px-2.5 py-1 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-red-300 text-[10px] font-semibold border border-red-500/40 transition-colors cursor-pointer flex items-center gap-1"
-                                  title="Remove Leader status"
-                                >
-                                  <Star className="w-3 h-3 fill-red-300" />
-                                  <span>Remove Leader</span>
-                                </button>
-                              )
-                            )}
                           </div>
                         </div>
                       );
